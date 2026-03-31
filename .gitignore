@@ -1,0 +1,12 @@
+frontend/.next/
+frontend/.next-build/
+frontend/node_modules/
+backend/.venv/
+backend/storage/
+backend/__pycache__/
+backend/.pytest_cache/
+*.pyc
+.env
+.env.local
+backend/.env
+frontend/.env.local

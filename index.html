@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ChoirLift | SATB Training System</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Personalized Choir Vocal Training System</p>
+        <h1>Train every singer on the exact part they need.</h1>
+        <p class="hero-text">
+          Upload choir scores, simulate SATB voice separation, practice parts independently,
+          and keep a simple digital trail of each singer's progress.
+        </p>
+        <div class="hero-actions">
+          <a href="#workspace" class="primary-link">Open Workspace</a>
+          <button id="seed-demo" class="secondary-button" type="button">Load Demo Data</button>
+        </div>
+      </div>
+      <aside class="hero-panel">
+        <h2>Project Objectives</h2>
+        <ul>
+          <li>Accept PDF, MusicXML, and MIDI uploads</li>
+          <li>Organize SATB parts for independent practice</li>
+          <li>Control playback with solo, mute, and tempo</li>
+          <li>Export separated outputs</li>
+          <li>Track singer training progress</li>
+        </ul>
+      </aside>
+    </header>
+
+    <main id="workspace" class="workspace">
+      <section class="panel upload-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-label">Score Intake</p>
+            <h2>Upload a choir score</h2>
+          </div>
+          <span id="processing-badge" class="status-badge">Awaiting upload</span>
+        </div>
+        <form id="upload-form" class="upload-form">
+          <label class="dropzone" for="score-file">
+            <input id="score-file" name="score-file" type="file" accept=".pdf,.musicxml,.xml,.midi,.mid">
+            <span class="dropzone-title">Choose PDF, MusicXML, or MIDI</span>
+            <span class="dropzone-subtitle">The MVP simulates score parsing and SATB extraction in the browser.</span>
+          </label>
+          <div class="form-grid">
+            <label>
+              Score title
+              <input id="score-title" type="text" placeholder="e.g. Hallelujah Chorus">
+            </label>
+            <label>
+              Composer / Source
+              <input id="score-composer" type="text" placeholder="e.g. G. F. Handel">
+            </label>
+          </div>
+          <button class="primary-button" type="submit">Process Score</button>
+        </form>
+        <div id="latest-upload" class="latest-upload empty-state">
+          No score processed yet.
+        </div>
+      </section>
+
+      <section class="stats-grid">
+        <article class="panel stat-card">
+          <p class="panel-label">Scores</p>
+          <strong id="score-count">0</strong>
+          <span>processed in this browser</span>
+        </article>
+        <article class="panel stat-card">
+          <p class="panel-label">SATB Accuracy</p>
+          <strong id="accuracy-rate">0%</strong>
+          <span>mock extraction benchmark</span>
+        </article>
+        <article class="panel stat-card">
+          <p class="panel-label">Exports</p>
+          <strong id="export-count">0</strong>
+          <span>successful downloads</span>
+        </article>
+        <article class="panel stat-card">
+          <p class="panel-label">Logged Sessions</p>
+          <strong id="activity-count">0</strong>
+          <span>trainer records captured</span>
+        </article>
+      </section>
+
+      <section class="workspace-grid">
+        <section class="panel parts-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-label">SATB Workspace</p>
+              <h2>Voice parts</h2>
+            </div>
+            <label class="tempo-control">
+              Tempo
+              <input id="tempo-slider" type="range" min="60" max="160" value="100">
+              <span id="tempo-value">100%</span>
+            </label>
+          </div>
+          <div id="voice-parts" class="voice-grid"></div>
+        </section>
+
+        <section class="panel export-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-label">Deliverables</p>
+              <h2>Export separated voices</h2>
+            </div>
+          </div>
+          <div id="export-actions" class="export-actions"></div>
+          <div id="export-log" class="muted-box">No exports yet.</div>
+        </section>
+      </section>
+
+      <section class="workspace-grid">
+        <section class="panel progress-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-label">Trainer Monitoring</p>
+              <h2>Log singer practice</h2>
+            </div>
+          </div>
+          <form id="progress-form" class="progress-form">
+            <div class="form-grid">
+              <label>
+                Singer name
+                <input id="singer-name" type="text" placeholder="e.g. Jane Doe" required>
+              </label>
+              <label>
+                Voice part
+                <select id="singer-part" required>
+                  <option value="Soprano">Soprano</option>
+                  <option value="Alto">Alto</option>
+                  <option value="Tenor">Tenor</option>
+                  <option value="Bass">Bass</option>
+                </select>
+              </label>
+            </div>
+            <div class="form-grid">
+              <label>
+                Completion
+                <input id="singer-completion" type="range" min="0" max="100" value="75">
+                <span id="completion-value">75%</span>
+              </label>
+              <label>
+                Trainer feedback
+                <textarea id="singer-feedback" rows="4" placeholder="Pitch stability improved on the alto line."></textarea>
+              </label>
+            </div>
+            <button class="primary-button" type="submit">Record Activity</button>
+          </form>
+        </section>
+
+        <section class="panel activity-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-label">Progress History</p>
+              <h2>Training log</h2>
+            </div>
+          </div>
+          <div id="activity-log" class="activity-log empty-state">
+            No training activities recorded yet.
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
