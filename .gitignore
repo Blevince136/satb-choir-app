@@ -2,8 +2,10 @@ frontend/.next/
 frontend/.next-build/
 frontend/node_modules/
 backend/.venv/
+backend/artifacts/
+backend/data/
 backend/storage/
-backend/__pycache__/
+**/__pycache__/
 backend/.pytest_cache/
 *.pyc
 .env

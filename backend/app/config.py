@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     mongodb_db_name: str = "satb_choir_app"
     allowed_origins: list[str] = ["http://localhost:3000"]
     audiveris_command: str | None = None
+    satb_model_path: str = "artifacts/satb_random_forest.joblib"
+    use_ml_classifier: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",

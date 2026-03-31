@@ -71,7 +71,7 @@ This gives you a strong academic path:
 
 1. Rule-based SATB extraction as the baseline
 2. Machine-learning SATB classification as the intelligent layer
-3. A later deep-learning model such as `LSTM`, `GRU`, or a small `Transformer` using the same extracted dataset
+3. A later deep-learning model such as a neural network, `LSTM`, `GRU`, or a small `Transformer` using the same extracted dataset
 
 ### Build a training dataset
 
@@ -90,3 +90,21 @@ cd backend
 ```
 
 This is the recommended first AI milestone before adding a neural-network model.
+
+### Train a neural-network SATB classifier
+
+Install PyTorch first:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m pip install torch
+```
+
+Then train the neural model:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe scripts\train_satb_neural.py data\satb_note_dataset.csv --model-output artifacts\satb_neural.pt --epochs 30
+```
+
+If PyTorch has a local DLL/runtime issue on Windows, the script automatically falls back to a `sklearn` multi-layer perceptron so you still have a working neural-network baseline.

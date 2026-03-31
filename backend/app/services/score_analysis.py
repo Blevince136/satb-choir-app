@@ -9,6 +9,8 @@ from typing import Iterable
 from music21 import chord, clef, converter, note, pitch, stream
 
 from app.config import settings
+from app.ml.dataset import feature_vector_from_note
+from app.ml.inference import predict_voice_label
 from app.schemas import ScoreAnalysisResult, VoicePartSummary
 
 
@@ -25,6 +27,7 @@ class ParsedTone:
     voice_part: str
     midi: int
     name_with_octave: str
+    classifier_used: str = "rule-based"
     source_voice: str | None = None
     source_staff: str | None = None
     source_part: str | None = None
@@ -32,7 +35,7 @@ class ParsedTone:
 
 def analyze_score_file(file_path: Path, source_format: str) -> ScoreAnalysisResult:
     normalized_format = source_format.upper()
-    parser_used = "music21"
+    parser_used = "music21+rule-based"
     warnings: list[str] = []
     parse_target = file_path
 
@@ -75,6 +78,10 @@ def analyze_score_file(file_path: Path, source_format: str) -> ScoreAnalysisResu
             "MIDI analysis is heuristic because staff and clef information may be missing."
         )
 
+    classifier_names = sorted({tone.classifier_used for tone in tones})
+    if classifier_names:
+        parser_used = f"music21+{'+'.join(classifier_names)}"
+
     voices = [_build_summary(name, tones) for name in ("Soprano", "Alto", "Tenor", "Bass")]
 
     return ScoreAnalysisResult(
@@ -91,11 +98,13 @@ def _extract_tones(parsed_score: stream.Score) -> list[ParsedTone]:
 
     for current_note in parsed_score.recurse().notes:
         if isinstance(current_note, note.Note):
+            voice_part, classifier_used = _classify_voice_part(current_note)
             extracted.append(
                 ParsedTone(
-                    voice_part=_classify_voice_part(current_note),
+                    voice_part=voice_part,
                     midi=int(current_note.pitch.midi),
                     name_with_octave=current_note.pitch.nameWithOctave,
+                    classifier_used=classifier_used,
                     source_voice=_get_source_voice(current_note),
                     source_staff=_get_source_staff(current_note),
                     source_part=_get_source_part(current_note),
@@ -103,11 +112,13 @@ def _extract_tones(parsed_score: stream.Score) -> list[ParsedTone]:
             )
         elif isinstance(current_note, chord.Chord):
             for chord_pitch in current_note.pitches:
+                voice_part, classifier_used = _classify_voice_part(current_note, chord_pitch.midi)
                 extracted.append(
                     ParsedTone(
-                        voice_part=_classify_voice_part(current_note, chord_pitch.midi),
+                        voice_part=voice_part,
                         midi=int(chord_pitch.midi),
                         name_with_octave=chord_pitch.nameWithOctave,
+                        classifier_used=classifier_used,
                         source_voice=_get_source_voice(current_note),
                         source_staff=_get_source_staff(current_note),
                         source_part=_get_source_part(current_note),
@@ -120,31 +131,36 @@ def _extract_tones(parsed_score: stream.Score) -> list[ParsedTone]:
 def _classify_voice_part(
     current_note: note.NotRest,
     midi_override: int | None = None,
-) -> str:
+) -> tuple[str, str]:
     midi_value = int(midi_override if midi_override is not None else current_note.pitch.midi)
+    if isinstance(current_note, note.Note):
+        predicted = predict_voice_label(feature_vector_from_note(current_note, midi_override))
+        if predicted is not None:
+            return predicted
+
     current_clef = current_note.getContextByClass(clef.Clef)
     part_name = (_get_source_part(current_note) or "").lower()
     voice_hint = (_get_source_voice(current_note) or "").strip()
 
     named_part = _voice_from_part_name(part_name)
     if named_part:
-        return named_part
+        return named_part, "part-name"
 
     if isinstance(current_clef, clef.BassClef):
         if voice_hint == "1":
-            return "Tenor"
+            return "Tenor", "voice-id"
         if voice_hint == "2":
-            return "Bass"
-        return "Tenor" if midi_value >= pitch.Pitch("C4").midi else "Bass"
+            return "Bass", "voice-id"
+        return ("Tenor" if midi_value >= pitch.Pitch("C4").midi else "Bass"), "rule-based"
 
     if isinstance(current_clef, clef.TrebleClef):
         if voice_hint == "1":
-            return "Soprano"
+            return "Soprano", "voice-id"
         if voice_hint == "2":
-            return "Alto"
-        return "Soprano" if midi_value >= pitch.Pitch("C5").midi else "Alto"
+            return "Alto", "voice-id"
+        return ("Soprano" if midi_value >= pitch.Pitch("C5").midi else "Alto"), "rule-based"
 
-    return _closest_range_voice(midi_value)
+    return _closest_range_voice(midi_value), "range-fallback"
 
 
 def _voice_from_part_name(part_name: str) -> str | None:

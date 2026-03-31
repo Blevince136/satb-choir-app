@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from music21 import clef, converter, note, pitch, stream
 
@@ -12,6 +13,20 @@ VOICE_TO_LABEL = {
     "Tenor": 2,
     "Bass": 3,
 }
+LABEL_TO_VOICE = {value: key for key, value in VOICE_TO_LABEL.items()}
+FEATURE_COLUMNS = [
+    "measure_number",
+    "offset",
+    "midi_pitch",
+    "duration_quarter_length",
+    "octave",
+    "staff_number",
+    "is_treble_clef",
+    "is_bass_clef",
+    "pitch_class",
+    "beat_strength",
+    "voice_hint",
+]
 
 
 @dataclass
@@ -52,29 +67,74 @@ def extract_labeled_note_rows(score_path: Path) -> list[NoteFeatureRow]:
         current_clef = current_note.getContextByClass(clef.Clef)
         measure = current_note.getContextByClass(stream.Measure)
         part = current_note.getContextByClass(stream.Part)
-        voice_stream = current_note.getContextByClass(stream.Voice)
+        feature_values = build_feature_values(current_note)
 
         extracted_rows.append(
             NoteFeatureRow(
                 source_file=score_path.name,
                 part_name=(part.partName or part.id) if part is not None else "",
-                measure_number=measure.number if measure is not None and measure.number else 0,
-                offset=float(current_note.offset),
-                midi_pitch=int(current_pitch.midi),
-                duration_quarter_length=float(current_note.duration.quarterLength),
-                octave=current_pitch.octave or 0,
-                staff_number=int(getattr(current_note, "staffNumber", 0) or 0),
-                is_treble_clef=int(isinstance(current_clef, clef.TrebleClef)),
-                is_bass_clef=int(isinstance(current_clef, clef.BassClef)),
-                pitch_class=int(current_pitch.pitchClass),
-                beat_strength=float(current_note.beatStrength or 0.0),
-                voice_hint=_normalize_voice_hint(voice_stream.id if voice_stream else None),
+                measure_number=int(feature_values["measure_number"]),
+                offset=float(feature_values["offset"]),
+                midi_pitch=int(feature_values["midi_pitch"]),
+                duration_quarter_length=float(feature_values["duration_quarter_length"]),
+                octave=int(feature_values["octave"]),
+                staff_number=int(feature_values["staff_number"]),
+                is_treble_clef=int(feature_values["is_treble_clef"]),
+                is_bass_clef=int(feature_values["is_bass_clef"]),
+                pitch_class=int(feature_values["pitch_class"]),
+                beat_strength=float(feature_values["beat_strength"]),
+                voice_hint=int(feature_values["voice_hint"]),
                 label_name=label_name,
                 label_id=VOICE_TO_LABEL[label_name],
             )
         )
 
     return extracted_rows
+
+
+def build_feature_values(
+    current_note: note.Note,
+    midi_override: int | None = None,
+) -> dict[str, float]:
+    current_pitch = current_note.pitch
+    pitch_midi = int(midi_override if midi_override is not None else current_pitch.midi)
+    current_clef = current_note.getContextByClass(clef.Clef)
+    measure = current_note.getContextByClass(stream.Measure)
+    voice_stream = current_note.getContextByClass(stream.Voice)
+
+    return {
+        "measure_number": float(measure.number if measure is not None and measure.number else 0),
+        "offset": float(current_note.offset),
+        "midi_pitch": float(pitch_midi),
+        "duration_quarter_length": float(current_note.duration.quarterLength),
+        "octave": float(current_pitch.octave or 0),
+        "staff_number": float(int(getattr(current_note, "staffNumber", 0) or 0)),
+        "is_treble_clef": float(int(isinstance(current_clef, clef.TrebleClef))),
+        "is_bass_clef": float(int(isinstance(current_clef, clef.BassClef))),
+        "pitch_class": float(int(pitch_midi % 12)),
+        "beat_strength": float(current_note.beatStrength or 0.0),
+        "voice_hint": float(_normalize_voice_hint(voice_stream.id if voice_stream else None)),
+    }
+
+
+def feature_vector_from_note(
+    current_note: note.Note,
+    midi_override: int | None = None,
+) -> list[float]:
+    values = build_feature_values(current_note, midi_override)
+    return [float(values[column]) for column in FEATURE_COLUMNS]
+
+
+def rows_to_training_arrays(
+    rows: list[dict[str, Any]],
+) -> tuple[list[list[float]], list[int], list[str]]:
+    features = [
+        [float(row[column]) for column in FEATURE_COLUMNS]
+        for row in rows
+    ]
+    labels = [int(row["label_id"]) for row in rows]
+    groups = [str(row["source_file"]) for row in rows]
+    return features, labels, groups
 
 
 def infer_label_from_context(current_note: note.Note) -> str | None:
