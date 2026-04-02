@@ -1,31 +1,40 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "Singmobi",
+    "slug": "singmobi",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#07111F"
     },
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "package": "com.satbchoirapp.mobile",
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#07111F"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "2452d3ef-14b3-4536-ac5c-88c3bc7fb5ff"
+      }
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
   }
 }

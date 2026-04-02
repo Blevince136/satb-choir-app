@@ -41,3 +41,39 @@ def predict_voice_label(feature_vector: list[float]) -> tuple[str, str] | None:
 
     prediction = model.predict([feature_vector])[0]
     return str(label_map.get(int(prediction), "Alto")), "ml-random-forest"
+
+
+def get_model_status() -> dict[str, object]:
+    model_path = Path(settings.satb_model_path)
+    if not model_path.is_absolute():
+        model_path = Path(__file__).resolve().parents[2] / model_path
+
+    if not settings.use_ml_classifier:
+        return {
+            "status": "disabled",
+            "classifier_enabled": False,
+            "model_available": model_path.exists(),
+            "model_backend": "none",
+            "model_path": str(model_path),
+            "note": "ML classifier is disabled in backend settings.",
+        }
+
+    artifact = load_satb_classifier()
+    if artifact is None:
+        return {
+            "status": "fallback",
+            "classifier_enabled": True,
+            "model_available": False,
+            "model_backend": "rule-based",
+            "model_path": str(model_path),
+            "note": "No trained SATB model artifact was found, so rule-based parsing is active.",
+        }
+
+    return {
+        "status": "ready",
+        "classifier_enabled": True,
+        "model_available": True,
+        "model_backend": str(artifact.get("backend", "random-forest")),
+        "model_path": str(model_path),
+        "note": "Trained SATB model is available for score parsing.",
+    }

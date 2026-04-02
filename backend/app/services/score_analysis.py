@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess
-from tempfile import TemporaryDirectory
 from typing import Iterable
+import shutil
 
 from music21 import chord, clef, converter, note, pitch, stream
 
@@ -21,21 +21,28 @@ SATB_RANGES = {
     "Bass": (pitch.Pitch("E2").midi, pitch.Pitch("C4").midi),
 }
 
+STAFF_VOICE_PAIRS = {
+    "treble": ("Soprano", "Alto"),
+    "bass": ("Tenor", "Bass"),
+}
+
 
 @dataclass
 class ParsedTone:
     voice_part: str
     midi: int
     name_with_octave: str
-    classifier_used: str = "rule-based"
+    classifier_used: str = "range-fallback"
     source_voice: str | None = None
     source_staff: str | None = None
     source_part: str | None = None
+    offset_quarters: float = 0.0
+    duration_quarters: float = 1.0
 
 
 def analyze_score_file(file_path: Path, source_format: str) -> ScoreAnalysisResult:
     normalized_format = source_format.upper()
-    parser_used = "music21+rule-based"
+    parser_used = "music21+staff-stem"
     warnings: list[str] = []
     parse_target = file_path
 
@@ -55,20 +62,17 @@ def analyze_score_file(file_path: Path, source_format: str) -> ScoreAnalysisResu
                 source_format="PDF",
                 conversion_required=True,
                 parser_used=parser_used,
+                prepared_source_path=None,
                 voices=[],
                 warnings=warnings,
             )
 
     try:
-        try:
-            parsed_score = converter.parse(str(parse_target))
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"Unable to parse {normalized_format} score: {exc}") from exc
+        parsed_score = converter.parse(str(parse_target))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Unable to parse {normalized_format} score: {exc}") from exc
 
-        tones = _extract_tones(parsed_score)
-    finally:
-        if parse_target != file_path:
-            parse_target.unlink(missing_ok=True)
+    tones = extract_classified_tones(parsed_score)
 
     if not tones:
         warnings.append("No note events were detected in the uploaded score.")
@@ -88,79 +92,221 @@ def analyze_score_file(file_path: Path, source_format: str) -> ScoreAnalysisResu
         source_format=normalized_format,
         conversion_required=False,
         parser_used=parser_used,
+        prepared_source_path=str(parse_target),
         voices=voices,
         warnings=warnings,
     )
 
 
-def _extract_tones(parsed_score: stream.Score) -> list[ParsedTone]:
+def extract_classified_tones(parsed_score: stream.Score) -> list[ParsedTone]:
     extracted: list[ParsedTone] = []
 
-    for current_note in parsed_score.recurse().notes:
-        if isinstance(current_note, note.Note):
-            voice_part, classifier_used = _classify_voice_part(current_note)
-            extracted.append(
-                ParsedTone(
-                    voice_part=voice_part,
-                    midi=int(current_note.pitch.midi),
-                    name_with_octave=current_note.pitch.nameWithOctave,
-                    classifier_used=classifier_used,
-                    source_voice=_get_source_voice(current_note),
-                    source_staff=_get_source_staff(current_note),
-                    source_part=_get_source_part(current_note),
+    for current_element in parsed_score.recurse().notes:
+        offset_quarters = float(current_element.getOffsetInHierarchy(parsed_score))
+        duration_quarters = float(current_element.duration.quarterLength)
+        source_voice = _get_source_voice(current_element)
+        source_staff = _get_source_staff(current_element)
+        source_part = _get_source_part(current_element)
+
+        if isinstance(current_element, note.Note):
+            voice_assignments = _classify_note_assignments(current_element)
+            for voice_part, classifier_used in voice_assignments:
+                extracted.append(
+                    ParsedTone(
+                        voice_part=voice_part,
+                        midi=int(current_element.pitch.midi),
+                        name_with_octave=current_element.pitch.nameWithOctave,
+                        classifier_used=classifier_used,
+                        source_voice=source_voice,
+                        source_staff=source_staff,
+                        source_part=source_part,
+                        offset_quarters=offset_quarters,
+                        duration_quarters=duration_quarters,
+                    )
                 )
-            )
-        elif isinstance(current_note, chord.Chord):
-            for chord_pitch in current_note.pitches:
-                voice_part, classifier_used = _classify_voice_part(current_note, chord_pitch.midi)
+            continue
+
+        if isinstance(current_element, chord.Chord):
+            for chord_pitch, voice_part, classifier_used in _classify_chord_assignments(current_element):
                 extracted.append(
                     ParsedTone(
                         voice_part=voice_part,
                         midi=int(chord_pitch.midi),
                         name_with_octave=chord_pitch.nameWithOctave,
                         classifier_used=classifier_used,
-                        source_voice=_get_source_voice(current_note),
-                        source_staff=_get_source_staff(current_note),
-                        source_part=_get_source_part(current_note),
+                        source_voice=source_voice,
+                        source_staff=source_staff,
+                        source_part=source_part,
+                        offset_quarters=offset_quarters,
+                        duration_quarters=duration_quarters,
                     )
                 )
 
     return extracted
 
 
+def _classify_note_assignments(current_note: note.Note) -> list[tuple[str, str]]:
+    part_name = (_get_source_part(current_note) or "").lower()
+    named_part = _voice_from_part_name(part_name)
+    if named_part:
+        return [(named_part, "part-name")]
+
+    pair_name = _resolve_staff_pair_name(current_note)
+    voice_hint = (_get_source_voice(current_note) or "").strip()
+    stem_direction = _normalize_stem_direction(getattr(current_note, "stemDirection", None))
+    midi_value = int(current_note.pitch.midi)
+
+    if pair_name is not None:
+        upper_voice, lower_voice = STAFF_VOICE_PAIRS[pair_name]
+
+        if voice_hint == "1":
+            return [(upper_voice, "voice-id")]
+        if voice_hint == "2":
+            return [(lower_voice, "voice-id")]
+
+        if _is_unison_context(current_note, pair_name):
+            return [(upper_voice, "staff-unison"), (lower_voice, "staff-unison")]
+
+        if stem_direction == "up":
+            return [(upper_voice, "staff-stem")]
+        if stem_direction == "down":
+            return [(lower_voice, "staff-stem")]
+
+        return [(_classify_with_pair(current_note, midi_value, pair_name), "staff-pitch")]
+
+    predicted = predict_voice_label(feature_vector_from_note(current_note))
+    if predicted is not None:
+        return [(predicted, "ml-fallback")]
+
+    return [(_closest_range_voice(midi_value), "range-fallback")]
+
+
+def _classify_chord_assignments(current_chord: chord.Chord) -> list[tuple[pitch.Pitch, str, str]]:
+    part_name = (_get_source_part(current_chord) or "").lower()
+    named_part = _voice_from_part_name(part_name)
+    if named_part:
+        return [(current_pitch, named_part, "part-name") for current_pitch in current_chord.pitches]
+
+    pair_name = _resolve_staff_pair_name(current_chord)
+    voice_hint = (_get_source_voice(current_chord) or "").strip()
+    stem_direction = _normalize_stem_direction(getattr(current_chord, "stemDirection", None))
+    ordered_pitches = sorted(current_chord.pitches, key=lambda current_pitch: current_pitch.midi)
+
+    if pair_name is not None:
+        upper_voice, lower_voice = STAFF_VOICE_PAIRS[pair_name]
+
+        if voice_hint == "1":
+            return [(current_pitch, upper_voice, "voice-id") for current_pitch in ordered_pitches]
+        if voice_hint == "2":
+            return [(current_pitch, lower_voice, "voice-id") for current_pitch in ordered_pitches]
+
+        if len(ordered_pitches) == 1:
+            only_pitch = ordered_pitches[0]
+            return [
+                (only_pitch, upper_voice, "staff-unison"),
+                (only_pitch, lower_voice, "staff-unison"),
+            ]
+
+        if stem_direction == "up":
+            return [(current_pitch, upper_voice, "staff-stem") for current_pitch in ordered_pitches]
+        if stem_direction == "down":
+            return [(current_pitch, lower_voice, "staff-stem") for current_pitch in ordered_pitches]
+
+        assignments: list[tuple[pitch.Pitch, str, str]] = [
+            (ordered_pitches[-1], upper_voice, "staff-chord"),
+            (ordered_pitches[0], lower_voice, "staff-chord"),
+        ]
+        if len(ordered_pitches) > 2:
+            for middle_pitch in ordered_pitches[1:-1]:
+                assigned_voice = _classify_with_pair(current_chord, int(middle_pitch.midi), pair_name)
+                assignments.append((middle_pitch, assigned_voice, "staff-pitch"))
+        return assignments
+
+    assignments = []
+    for current_pitch in ordered_pitches:
+        predicted = predict_voice_label(feature_vector_from_note(current_chord, int(current_pitch.midi)))
+        if predicted is not None:
+            assignments.append((current_pitch, predicted, "ml-fallback"))
+        else:
+            assignments.append((current_pitch, _closest_range_voice(int(current_pitch.midi)), "range-fallback"))
+    return assignments
+
+
 def _classify_voice_part(
     current_note: note.NotRest,
     midi_override: int | None = None,
 ) -> tuple[str, str]:
-    midi_value = int(midi_override if midi_override is not None else current_note.pitch.midi)
     if isinstance(current_note, note.Note):
-        predicted = predict_voice_label(feature_vector_from_note(current_note, midi_override))
-        if predicted is not None:
-            return predicted
+        assignments = _classify_note_assignments(current_note)
+        if len(assignments) == 1:
+            return assignments[0]
+        midi_value = int(midi_override if midi_override is not None else current_note.pitch.midi)
+        ordered_assignments = sorted(
+            assignments,
+            key=lambda assignment: abs(midi_value - ((SATB_RANGES[assignment[0]][0] + SATB_RANGES[assignment[0]][1]) / 2)),
+        )
+        return ordered_assignments[0]
 
+    if isinstance(current_note, chord.Chord):
+        midi_value = int(midi_override if midi_override is not None else current_note.sortAscending().pitches[-1].midi)
+        assignments = _classify_chord_assignments(current_note)
+        matching = [assignment for assignment in assignments if int(assignment[0].midi) == midi_value]
+        if matching:
+            return matching[0][1], matching[0][2]
+        return assignments[-1][1], assignments[-1][2]
+
+    return _closest_range_voice(int(midi_override or 60)), "range-fallback"
+
+
+def _resolve_staff_pair_name(current_note: note.NotRest) -> str | None:
     current_clef = current_note.getContextByClass(clef.Clef)
-    part_name = (_get_source_part(current_note) or "").lower()
-    voice_hint = (_get_source_voice(current_note) or "").strip()
-
-    named_part = _voice_from_part_name(part_name)
-    if named_part:
-        return named_part, "part-name"
-
-    if isinstance(current_clef, clef.BassClef):
-        if voice_hint == "1":
-            return "Tenor", "voice-id"
-        if voice_hint == "2":
-            return "Bass", "voice-id"
-        return ("Tenor" if midi_value >= pitch.Pitch("C4").midi else "Bass"), "rule-based"
-
     if isinstance(current_clef, clef.TrebleClef):
-        if voice_hint == "1":
-            return "Soprano", "voice-id"
-        if voice_hint == "2":
-            return "Alto", "voice-id"
-        return ("Soprano" if midi_value >= pitch.Pitch("C5").midi else "Alto"), "rule-based"
+        return "treble"
+    if isinstance(current_clef, clef.BassClef):
+        return "bass"
 
-    return _closest_range_voice(midi_value), "range-fallback"
+    staff_number = _get_source_staff(current_note)
+    if staff_number == "1":
+        return "treble"
+    if staff_number == "2":
+        return "bass"
+    return None
+
+
+def _classify_with_pair(current_note: note.NotRest, midi_value: int, pair_name: str) -> str:
+    upper_voice, lower_voice = STAFF_VOICE_PAIRS[pair_name]
+    predicted = predict_voice_label(feature_vector_from_note(current_note, midi_value))
+    if predicted in {upper_voice, lower_voice}:
+        return predicted
+
+    upper_midpoint = sum(SATB_RANGES[upper_voice]) / 2
+    lower_midpoint = sum(SATB_RANGES[lower_voice]) / 2
+    if abs(midi_value - upper_midpoint) <= abs(midi_value - lower_midpoint):
+        return upper_voice
+    return lower_voice
+
+
+def _normalize_stem_direction(stem_direction: str | None) -> str | None:
+    if stem_direction is None:
+        return None
+    lowered = stem_direction.strip().lower()
+    if lowered in {"up", "down"}:
+        return lowered
+    return None
+
+
+def _is_unison_context(current_note: note.Note, pair_name: str) -> bool:
+    measure = current_note.getContextByClass(stream.Measure)
+    if measure is None:
+        return False
+
+    same_time_items = [
+        item
+        for item in measure.notes
+        if abs(float(item.offset) - float(current_note.offset)) < 1e-6
+        and _resolve_staff_pair_name(item) == pair_name
+    ]
+    return len(same_time_items) == 1
 
 
 def _voice_from_part_name(part_name: str) -> str | None:
@@ -258,6 +404,14 @@ def _audiveris_hint() -> str:
 
 
 def _prepare_pdf_input(file_path: Path) -> tuple[Path | None, list[str], str]:
+    existing_export = _find_existing_export(file_path)
+    if existing_export is not None:
+        return (
+            existing_export,
+            ["Existing MusicXML conversion reused for SATB analysis."],
+            "audiveris+music21",
+        )
+
     if not settings.audiveris_command:
         return (
             None,
@@ -268,65 +422,78 @@ def _prepare_pdf_input(file_path: Path) -> tuple[Path | None, list[str], str]:
             "audiveris-required",
         )
 
-    with TemporaryDirectory() as output_dir:
-        command = [
-            settings.audiveris_command,
-            "-batch",
-            "-transcribe",
-            "-export",
-            "-output",
-            output_dir,
-            str(file_path),
-        ]
+    output_dir = file_path.parent / "_audiveris_output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir, ignore_errors=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except FileNotFoundError:
-            return (
-                None,
-                [
-                    "Configured Audiveris command was not found on this machine.",
-                    _audiveris_hint(),
-                ],
-                "audiveris-required",
-            )
+    command = [
+        settings.audiveris_command,
+        "-batch",
+        "-transcribe",
+        "-export",
+        "-output",
+        str(output_dir),
+        str(file_path),
+    ]
 
-        if completed.returncode != 0:
-            stderr = completed.stderr.strip() or completed.stdout.strip() or "Unknown Audiveris error."
-            return (
-                None,
-                [
-                    "Audiveris conversion failed before SATB extraction.",
-                    stderr,
-                ],
-                "audiveris",
-            )
-
-        exported_files = sorted(
-            [
-                *Path(output_dir).rglob("*.musicxml"),
-                *Path(output_dir).rglob("*.xml"),
-                *Path(output_dir).rglob("*.mxl"),
-            ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
         )
-
-        if not exported_files:
-            return (
-                None,
-                ["Audiveris finished, but no MusicXML export was produced."],
-                "audiveris",
-            )
-
-        exported_path = exported_files[0]
-        persisted_output = file_path.with_suffix(exported_path.suffix)
-        persisted_output.write_bytes(exported_path.read_bytes())
+    except FileNotFoundError:
         return (
-            persisted_output,
-            ["PDF converted to MusicXML before SATB analysis."],
-            "audiveris+music21",
+            None,
+            [
+                "Configured Audiveris command was not found on this machine.",
+                _audiveris_hint(),
+            ],
+            "audiveris-required",
         )
+
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip() or "Unknown Audiveris error."
+        return (
+            None,
+            [
+                "Audiveris conversion failed before SATB extraction.",
+                stderr,
+            ],
+            "audiveris",
+        )
+
+    exported_files = sorted(
+        [
+            *output_dir.rglob("*.musicxml"),
+            *output_dir.rglob("*.xml"),
+            *output_dir.rglob("*.mxl"),
+        ]
+    )
+
+    if not exported_files:
+        return (
+            None,
+            ["Audiveris finished, but no MusicXML export was produced."],
+            "audiveris",
+        )
+
+    exported_path = exported_files[0]
+    persisted_output = file_path.with_suffix(exported_path.suffix)
+    persisted_output.write_bytes(exported_path.read_bytes())
+    shutil.rmtree(output_dir, ignore_errors=True)
+    return (
+        persisted_output,
+        ["PDF converted to MusicXML before SATB analysis."],
+        "audiveris+music21",
+    )
+
+
+def _find_existing_export(file_path: Path) -> Path | None:
+    for suffix in (".musicxml", ".xml", ".mxl"):
+        candidate = file_path.with_suffix(suffix)
+        if candidate.exists():
+            return candidate
+    return None

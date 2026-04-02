@@ -7,7 +7,16 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     mongodb_uri: str = "mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority"
     mongodb_db_name: str = "satb_choir_app"
-    allowed_origins: list[str] = ["http://localhost:3000"]
+    # In development, allow frontend + emulator + expo origins.
+    # For production, use explicit origins only.
+    allowed_origins: list[str] = [
+        "http://localhost:3000",
+        "http://10.0.2.2:3000",
+        "http://10.0.2.2:8000",
+        "http://127.0.0.1:3000",
+        "http://192.168.0.0/16",
+        "*",
+    ]
     audiveris_command: str | None = None
     satb_model_path: str = "artifacts/satb_random_forest.joblib"
     use_ml_classifier: bool = True
