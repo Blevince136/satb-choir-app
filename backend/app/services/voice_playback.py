@@ -15,7 +15,7 @@ from app.services.score_analysis import _prepare_pdf_input, extract_classified_t
 
 PLAYBACK_CACHE_ROOT = Path(__file__).resolve().parents[2] / "storage" / "playback-cache"
 PLAYBACK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-PLAYBACK_CACHE_VERSION = "v4"
+PLAYBACK_CACHE_VERSION = "v5"
 
 
 @dataclass
@@ -138,7 +138,7 @@ def _extract_voice_events(parsed_score: stream.Score, selected_voice_part: str) 
             voice_part=selected_voice_part,
             offset_quarters=offset_quarters,
             duration_quarters=duration_quarters,
-            midi_pitches=sorted(midi_pitches),
+            midi_pitches=_normalize_solo_pitches(sorted(set(midi_pitches)), selected_voice_part),
         )
         for (offset_quarters, duration_quarters), midi_pitches in sorted(grouped_events.items())
     ]
@@ -148,7 +148,7 @@ def _build_voice_stream(events: list[VoicePlaybackEvent], voice_part: str) -> st
     score = stream.Score(id=f"{voice_part}Export")
     part = stream.Part(id=voice_part)
     for event in events:
-        if len(event.midi_pitches) == 1:
+        if voice_part != "Harmony" or len(event.midi_pitches) == 1:
             current_element = note.Note(event.midi_pitches[0])
         else:
             current_element = chord.Chord(event.midi_pitches)
@@ -169,6 +169,9 @@ def _synthesize_wav(events: list[VoicePlaybackEvent], tempo: int) -> bytes:
     waveform = [0.0] * total_samples
 
     ordered_events = sorted(events, key=lambda current_event: current_event.offset_quarters)
+    is_harmony_render = any(len(current_event.midi_pitches) > 1 for current_event in ordered_events) or any(
+        current_event.voice_part == "Harmony" for current_event in ordered_events
+    )
 
     for index, event in enumerate(ordered_events):
         start_sample = int(event.offset_quarters * seconds_per_quarter * sample_rate)
@@ -182,6 +185,7 @@ def _synthesize_wav(events: list[VoicePlaybackEvent], tempo: int) -> bytes:
             sample_rate,
             start_seconds=event.offset_quarters * seconds_per_quarter,
             next_onset_seconds=next_offset_seconds,
+            allow_overlap=is_harmony_render,
         )
 
         for note_index, sample in enumerate(note_samples):
@@ -215,9 +219,10 @@ def _piano_like_wave(
     sample_rate: int,
     start_seconds: float,
     next_onset_seconds: float | None = None,
+    allow_overlap: bool = False,
 ) -> list[float]:
     release_seconds = min(0.16, max(duration_seconds * 0.32, 0.08))
-    overlap_seconds = 0.04
+    overlap_seconds = 0.04 if allow_overlap else 0.0
     sounding_seconds = duration_seconds + release_seconds
     if next_onset_seconds is not None:
         time_until_next = max(next_onset_seconds - start_seconds, 0.05)
@@ -253,6 +258,22 @@ def _piano_like_wave(
 
     divisor = max(math.sqrt(len(midi_pitches)), 1)
     return [sample / divisor for sample in output]
+
+
+def _normalize_solo_pitches(midi_pitches: list[int], voice_part: str) -> list[int]:
+    if not midi_pitches:
+        return midi_pitches
+
+    if len(midi_pitches) == 1:
+        return midi_pitches
+
+    if voice_part in {"Soprano", "Tenor"}:
+        return [max(midi_pitches)]
+
+    if voice_part in {"Alto", "Bass"}:
+        return [min(midi_pitches)]
+
+    return [midi_pitches[0]]
 
 
 def _playback_cache_path(file_path: Path, source_format: str, voice_part: str, tempo: int) -> Path:

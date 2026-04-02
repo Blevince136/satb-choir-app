@@ -7,6 +7,10 @@ import * as Sharing from "expo-sharing";
 import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  KeyboardAvoidingView,
+  Linking,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -147,6 +151,7 @@ const practiceList = [
 ];
 
 const AUTH_TOKEN_KEY = "singmobi_access_token";
+const PREWARM_VOICES: PlaybackVoice[] = ["Harmony", "Soprano", "Alto", "Tenor", "Bass"];
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -179,6 +184,7 @@ export default function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatusResponse | null>(null);
   const [apiError, setApiError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [selectedPart, setSelectedPart] = useState<VoicePart["name"]>("Alto");
   const [tempo, setTempo] = useState("92");
@@ -212,6 +218,10 @@ export default function App() {
   const [isPracticeRecording, setIsPracticeRecording] = useState(false);
   const [isPracticeSubmitting, setIsPracticeSubmitting] = useState(false);
   const [practiceResult, setPracticeResult] = useState<PracticeRecordingResult | null>(null);
+  const [practiceRecordings, setPracticeRecordings] = useState<PracticeRecordingResult[]>([]);
+  const [isPracticePlaying, setIsPracticePlaying] = useState(false);
+  const [activePracticePlaybackId, setActivePracticePlaybackId] = useState<string | null>(null);
+  const [preloadedAudioKeys, setPreloadedAudioKeys] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let active = true;
@@ -306,6 +316,7 @@ export default function App() {
     }
 
     void refreshScores();
+    void refreshPracticeRecordings();
 
     const interval = setInterval(() => {
       void refreshScores();
@@ -313,6 +324,44 @@ export default function App() {
 
     return () => clearInterval(interval);
   }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    const readyScores = scores.filter(
+      (score) => score.processing_status === "parsed" && score.audio_cache_ready && score.audio_cache_tempo,
+    );
+
+    if (!readyScores.length) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function prewarmReadyScores() {
+      for (const score of readyScores) {
+        const readyTempo = score.audio_cache_tempo ?? 92;
+        for (const voice of PREWARM_VOICES) {
+          if (cancelled) {
+            return;
+          }
+          try {
+            await ensureLocalPlayback(score.id, voice, readyTempo);
+          } catch {
+            // Leave failures quiet here so preload doesn't disrupt the main UI flow.
+          }
+        }
+      }
+    }
+
+    void prewarmReadyScores();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, scores]);
 
   useEffect(() => {
     return () => {
@@ -329,6 +378,18 @@ export default function App() {
       }
     };
   }, [practiceSound]);
+
+  useEffect(() => {
+    if (!successMessage) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setSuccessMessage("");
+    }, 3000);
+
+    return () => clearTimeout(timer);
+  }, [successMessage]);
 
   const selectedVoice = useMemo(
     () => voiceParts.find((part) => part.name === selectedPart) ?? voiceParts[0],
@@ -358,6 +419,18 @@ export default function App() {
     () => parsedScores.find((score) => score.id === practiceScoreId) ?? null,
     [practiceScoreId, parsedScores],
   );
+  const activePracticeRecording = useMemo(
+    () =>
+      practiceRecordings.find((recording) => recording.id === activePracticePlaybackId) ??
+      (activePracticePlaybackId === "latest-local" && activePracticeScore && practiceVoice
+        ? {
+            id: "latest-local",
+            score_title: activePracticeScore.title,
+            voice_part: practiceVoice,
+          }
+        : null),
+    [activePracticePlaybackId, activePracticeScore, practiceRecordings, practiceVoice],
+  );
 
   function authHeaders(): Record<string, string> {
     return authToken
@@ -382,6 +455,24 @@ export default function App() {
     } catch (error) {
       setApiError(
         error instanceof Error ? error.message : "Unable to refresh imported scores.",
+      );
+    }
+  }
+
+  async function refreshPracticeRecordings() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/practice/recordings`, {
+        headers: authHeaders(),
+      });
+      if (!response.ok) {
+        throw new Error(`Status ${response.status}`);
+      }
+
+      const data = (await response.json()) as PracticeRecordingResult[];
+      setPracticeRecordings(data);
+    } catch (error) {
+      setApiError(
+        error instanceof Error ? error.message : "Unable to refresh recorded practice takes.",
       );
     }
   }
@@ -438,6 +529,11 @@ export default function App() {
       setActiveTab("Home");
       setApiError("");
       await refreshScores();
+      setSuccessMessage(
+        authMode === "signIn"
+          ? "Welcome back. Your saved scores are ready in your library."
+          : "Account created successfully. Your library will stay with this account.",
+      );
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to complete authentication.");
     } finally {
@@ -448,6 +544,7 @@ export default function App() {
   async function importScore() {
     try {
       setApiError("");
+      setSuccessMessage("");
       setIsBusy(true);
       const result = await DocumentPicker.getDocumentAsync({
         type: allowedMimeTypes,
@@ -481,7 +578,7 @@ export default function App() {
       }
 
       await refreshScores();
-      setApiError("Score uploaded and stored. Tap Parse Score when you are ready.");
+      setSuccessMessage("Score uploaded successfully. It is now stored in your library.");
     } catch (error) {
       setApiError(
         error instanceof Error
@@ -493,9 +590,34 @@ export default function App() {
     }
   }
 
+  async function searchScoresOnline() {
+    try {
+      const query = scoreSearch.trim();
+      if (!query) {
+        setApiError("Type a score title first, then use online search.");
+        return;
+      }
+
+      const url = `https://www.google.com/search?q=${encodeURIComponent(
+        `${query} sheet music pdf musicxml midi`,
+      )}`;
+      const canOpen = await Linking.canOpenURL(url);
+      if (!canOpen) {
+        throw new Error("Online score search is not available on this device.");
+      }
+
+      await Linking.openURL(url);
+    } catch (error) {
+      setApiError(
+        error instanceof Error ? error.message : "Unable to open online score search.",
+      );
+    }
+  }
+
   async function parseScore(scoreId: string) {
     try {
       setApiError("");
+      setSuccessMessage("");
       const response = await fetch(`${API_BASE_URL}/api/scores/${scoreId}/parse`, {
         method: "POST",
         headers: authHeaders(),
@@ -507,11 +629,57 @@ export default function App() {
       }
 
       await refreshScores();
+      setSuccessMessage("Parsing has started successfully for this score.");
     } catch (error) {
       setApiError(
         error instanceof Error ? error.message : "Unable to start score parsing.",
       );
     }
+  }
+
+  function localPlaybackPath(scoreId: string, voicePart: PlaybackVoice, tempo: number) {
+    const targetDirectory = FileSystem.documentDirectory ?? FileSystem.cacheDirectory;
+    if (!targetDirectory) {
+      throw new Error("No local storage is available for playback.");
+    }
+    return `${targetDirectory}playback-${scoreId}-${voicePart.toLowerCase()}-${tempo}.wav`;
+  }
+
+  async function ensureLocalPlayback(
+    scoreId: string,
+    voicePart: PlaybackVoice,
+    tempo: number,
+  ) {
+    const targetPath = localPlaybackPath(scoreId, voicePart, tempo);
+    const cacheKey = `${scoreId}:${voicePart}:${tempo}`;
+    const existing = await FileSystem.getInfoAsync(targetPath);
+    if (existing.exists) {
+      setPreloadedAudioKeys((current) => (current[cacheKey] ? current : { ...current, [cacheKey]: true }));
+      return targetPath;
+    }
+
+    const downloadResult = await FileSystem.downloadAsync(
+      `${API_BASE_URL}/api/scores/${scoreId}/playback?voice_part=${voicePart}&tempo=${tempo}`,
+      targetPath,
+      {
+        headers: authHeaders(),
+      },
+    );
+
+    if (downloadResult.status !== 200) {
+      throw new Error(`Playback download failed (${downloadResult.status}).`);
+    }
+
+    const downloadedInfo = await FileSystem.getInfoAsync(downloadResult.uri);
+    if (!downloadedInfo.exists) {
+      throw new Error("Playback file could not be found on the device.");
+    }
+    if ("size" in downloadedInfo && typeof downloadedInfo.size === "number" && downloadedInfo.size <= 44) {
+      throw new Error("Playback file is empty.");
+    }
+
+    setPreloadedAudioKeys((current) => ({ ...current, [cacheKey]: true }));
+    return downloadResult.uri;
   }
 
   async function playVoice(scoreId: string, voicePart: PlaybackVoice) {
@@ -522,37 +690,26 @@ export default function App() {
       if (sound) {
         await sound.unloadAsync();
       }
+      if (practiceSound) {
+        await practiceSound.unloadAsync();
+        setPracticeSound(null);
+        setActivePracticePlaybackId(null);
+        setIsPracticePlaying(false);
+      }
 
       await Audio.setAudioModeAsync({
         playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
+        staysActiveInBackground: true,
         shouldDuckAndroid: false,
         playThroughEarpieceAndroid: false,
       });
 
-      const playbackPath = `${FileSystem.cacheDirectory ?? FileSystem.documentDirectory}${scoreId}-${voicePart.toLowerCase()}-${playbackTempo}-${Date.now()}.wav`;
-      const playbackDownload = await FileSystem.downloadAsync(
-        `${API_BASE_URL}/api/scores/${scoreId}/playback?voice_part=${voicePart}&tempo=${encodeURIComponent(playbackTempo)}&ts=${Date.now()}`,
-        playbackPath,
-        {
-          headers: authHeaders(),
-        },
-      );
-      if (playbackDownload.status !== 200) {
-        throw new Error(`Playback download failed (${playbackDownload.status}).`);
-      }
-
-      const downloadedInfo = await FileSystem.getInfoAsync(playbackDownload.uri);
-      if (!downloadedInfo.exists) {
-        throw new Error("Playback file could not be found on the device.");
-      }
-      if ("size" in downloadedInfo && typeof downloadedInfo.size === "number" && downloadedInfo.size <= 44) {
-        throw new Error("Playback file is empty.");
-      }
+      const selectedTempo = Number.parseInt(playbackTempo, 10) || 92;
+      const playbackUri = await ensureLocalPlayback(scoreId, voicePart, selectedTempo);
 
       const { sound: nextSound } = await Audio.Sound.createAsync(
         {
-          uri: playbackDownload.uri,
+          uri: playbackUri,
         },
         { shouldPlay: true, volume: 1.0, progressUpdateIntervalMillis: 250 },
       );
@@ -649,6 +806,7 @@ export default function App() {
   async function saveScoreChanges(scoreId: string) {
     try {
       setApiError("");
+      setSuccessMessage("");
       const response = await fetch(`${API_BASE_URL}/api/scores/${scoreId}`, {
         method: "PATCH",
         headers: {
@@ -667,14 +825,36 @@ export default function App() {
 
       setEditingScoreId(null);
       await refreshScores();
+      setSuccessMessage("Score details updated successfully.");
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to save score changes.");
     }
   }
 
+  function confirmRemoveScore(scoreId: string, scoreTitle: string) {
+    Alert.alert(
+      "Delete score?",
+      `Are you sure you want to delete "${scoreTitle}"? This will remove the stored score and its generated files from your library.`,
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            void removeScore(scoreId);
+          },
+        },
+      ],
+    );
+  }
+
   async function removeScore(scoreId: string) {
     try {
       setApiError("");
+      setSuccessMessage("");
       const response = await fetch(`${API_BASE_URL}/api/scores/${scoreId}`, {
         method: "DELETE",
         headers: authHeaders(),
@@ -687,6 +867,7 @@ export default function App() {
         await stopPlayback();
       }
       await refreshScores();
+      setSuccessMessage("Score deleted successfully.");
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to delete score.");
     }
@@ -699,6 +880,7 @@ export default function App() {
   ) {
     try {
       setApiError("");
+      setSuccessMessage("");
       const extensionMap = {
         audio: "wav",
         musicxml: "musicxml",
@@ -740,7 +922,7 @@ export default function App() {
                 : "public.xml",
         });
       }
-      setApiError(`${voicePart} ${exportFormat.toUpperCase()} exported successfully.`);
+      setSuccessMessage(`${voicePart} ${exportFormat.toUpperCase()} exported successfully.`);
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to export voice file.");
     }
@@ -808,18 +990,179 @@ export default function App() {
         return;
       }
 
+      if (sound) {
+        await sound.unloadAsync();
+        setSound(null);
+        setPlayingScoreId(null);
+        setIsPlaying(false);
+        setPlaybackPositionMillis(0);
+        setPlaybackDurationMillis(0);
+        setTransportState("stop");
+      }
       if (practiceSound) {
         await practiceSound.unloadAsync();
       }
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
+      });
 
       const { sound: nextPracticeSound } = await Audio.Sound.createAsync(
         { uri: practiceRecordingUri },
         { shouldPlay: true, volume: 1.0 },
       );
+      nextPracticeSound.setOnPlaybackStatusUpdate((status) => {
+        if (!status.isLoaded) {
+          return;
+        }
+        setIsPracticePlaying(status.isPlaying ?? false);
+        if (status.didJustFinish) {
+          setActivePracticePlaybackId(null);
+          setIsPracticePlaying(false);
+        }
+      });
       setPracticeSound(nextPracticeSound);
+      setActivePracticePlaybackId("latest-local");
+      setIsPracticePlaying(true);
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to replay the practice recording.");
     }
+  }
+
+  async function playSavedPracticeRecording(recording: PracticeRecordingResult) {
+    try {
+      if (sound) {
+        await sound.unloadAsync();
+        setSound(null);
+        setPlayingScoreId(null);
+        setIsPlaying(false);
+        setPlaybackPositionMillis(0);
+        setPlaybackDurationMillis(0);
+        setTransportState("stop");
+      }
+      if (practiceSound) {
+        await practiceSound.unloadAsync();
+      }
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
+      });
+
+      const targetDirectory = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
+      if (!targetDirectory) {
+        throw new Error("No local storage available for practice playback.");
+      }
+
+      const downloadTarget = `${targetDirectory}practice-${recording.id}.m4a`;
+      const downloadResult = await FileSystem.downloadAsync(
+        `${API_BASE_URL}/api/practice/recordings/${recording.id}/audio`,
+        downloadTarget,
+        { headers: authHeaders() },
+      );
+
+      if (downloadResult.status !== 200) {
+        throw new Error(`Unable to load saved take (${downloadResult.status}).`);
+      }
+
+      const { sound: nextPracticeSound } = await Audio.Sound.createAsync(
+        { uri: downloadResult.uri },
+        { shouldPlay: true, volume: 1.0 },
+      );
+      nextPracticeSound.setOnPlaybackStatusUpdate((status) => {
+        if (!status.isLoaded) {
+          return;
+        }
+        setIsPracticePlaying(status.isPlaying ?? false);
+        if (status.didJustFinish) {
+          setActivePracticePlaybackId(null);
+          setIsPracticePlaying(false);
+        }
+      });
+      setPracticeSound(nextPracticeSound);
+      setActivePracticePlaybackId(recording.id);
+      setIsPracticePlaying(true);
+    } catch (error) {
+      setApiError(
+        error instanceof Error ? error.message : "Unable to play the saved practice take.",
+      );
+    }
+  }
+
+  async function pausePracticePlayback() {
+    if (!practiceSound) {
+      return;
+    }
+
+    await practiceSound.pauseAsync();
+    setIsPracticePlaying(false);
+  }
+
+  async function stopPracticePlayback() {
+    if (!practiceSound) {
+      return;
+    }
+
+    await practiceSound.stopAsync();
+    await practiceSound.unloadAsync();
+    setPracticeSound(null);
+    setActivePracticePlaybackId(null);
+    setIsPracticePlaying(false);
+  }
+
+  async function deletePracticeRecording(recordingId: string) {
+    try {
+      setApiError("");
+      setSuccessMessage("");
+      const response = await fetch(`${API_BASE_URL}/api/practice/recordings/${recordingId}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Unable to delete recording (${response.status}).`);
+      }
+
+      if (activePracticePlaybackId === recordingId && practiceSound) {
+        await practiceSound.stopAsync();
+        await practiceSound.unloadAsync();
+        setPracticeSound(null);
+        setActivePracticePlaybackId(null);
+        setIsPracticePlaying(false);
+      }
+
+      await refreshPracticeRecordings();
+      setSuccessMessage("Recorded voice deleted successfully.");
+    } catch (error) {
+      setApiError(
+        error instanceof Error ? error.message : "Unable to delete the recorded voice.",
+      );
+    }
+  }
+
+  function confirmDeletePracticeRecording(recording: PracticeRecordingResult) {
+    Alert.alert(
+      "Delete recorded voice?",
+      `Are you sure you want to delete the saved take for "${recording.score_title}" (${recording.voice_part})?`,
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            void deletePracticeRecording(recording.id);
+          },
+        },
+      ],
+    );
   }
 
   async function submitPracticeRecording() {
@@ -855,6 +1198,7 @@ export default function App() {
 
       const result = JSON.parse(uploadResult.body) as PracticeRecordingResult;
       setPracticeResult(result);
+      await refreshPracticeRecordings();
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Unable to analyze the practice recording.");
     } finally {
@@ -880,7 +1224,15 @@ export default function App() {
     return (
       <SafeAreaView style={styles.safeArea}>
         <StatusBar style="light" />
-        <ScrollView contentContainerStyle={styles.container}>
+        <KeyboardAvoidingView
+          style={styles.keyboardWrap}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
+        <ScrollView
+          contentContainerStyle={styles.container}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+        >
           <View style={styles.heroCard}>
             <MusicHeroArt />
             <Text style={styles.eyebrow}>Singer Access</Text>
@@ -947,6 +1299,7 @@ export default function App() {
             </Pressable>
           </View>
         </ScrollView>
+        </KeyboardAvoidingView>
       </SafeAreaView>
     );
   }
@@ -954,7 +1307,15 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="light" />
-      <ScrollView contentContainerStyle={styles.container}>
+      <KeyboardAvoidingView
+        style={styles.keyboardWrap}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+      >
+      <ScrollView
+        contentContainerStyle={styles.container}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <View style={styles.heroCard}>
           <View style={styles.heroOverlayOne} />
           <View style={styles.heroOverlayTwo} />
@@ -980,18 +1341,14 @@ export default function App() {
           </View>
           <View style={styles.statusRow}>
             <View style={styles.badge}>
-              <Text style={styles.badgeLabel}>
-                {health ? `${health.status} | ${health.service}` : "Checking API"}
-              </Text>
+              <Text style={styles.badgeLabel}>{health ? "System ready" : "Checking system"}</Text>
             </View>
             <View style={[styles.badge, styles.badgeSoft]}>
               <Text style={styles.badgeLabelSoft}>Selected part: {selectedPart}</Text>
             </View>
             {aiStatus ? (
               <View style={[styles.badge, styles.badgeAi]}>
-                <Text style={styles.badgeLabel}>
-                  AI: {aiStatus.model_backend} | {aiStatus.status}
-                </Text>
+                <Text style={styles.badgeLabel}>Smart analysis active</Text>
               </View>
             ) : null}
           </View>
@@ -999,8 +1356,15 @@ export default function App() {
 
         {apiError ? (
           <View style={styles.errorCard}>
-            <Text style={styles.errorTitle}>Backend connection note</Text>
-            <Text style={styles.errorText}>{apiError}</Text>
+            <Text style={styles.errorTitle}>Notice</Text>
+            <Text style={styles.errorText}>{getFriendlyMessage(apiError)}</Text>
+          </View>
+        ) : null}
+
+        {successMessage ? (
+          <View style={styles.successCard}>
+            <Text style={styles.successTitle}>Success</Text>
+            <Text style={styles.successText}>{successMessage}</Text>
           </View>
         ) : null}
 
@@ -1064,13 +1428,19 @@ export default function App() {
                 Upload PDF, MIDI, or MusicXML files here, parse them into stored tunes, and manage their details before or
                 after parsing.
               </Text>
-              <TextInput
-                value={scoreSearch}
-                onChangeText={setScoreSearch}
-                style={styles.input}
-                placeholder="Search scores by title, composer, file, or format"
-                placeholderTextColor="#6F87A5"
-              />
+              <Text style={styles.inputLabel}>Find a score</Text>
+              <View style={styles.searchRow}>
+                <TextInput
+                  value={scoreSearch}
+                  onChangeText={setScoreSearch}
+                  style={[styles.input, styles.searchInput]}
+                  placeholder="Search your library or type a score to search online"
+                  placeholderTextColor="#6F87A5"
+                />
+                <Pressable style={styles.searchButton} onPress={() => void searchScoresOnline()}>
+                  <Text style={styles.searchButtonLabel}>Online</Text>
+                </Pressable>
+              </View>
               <Pressable style={styles.primaryButton} onPress={importScore} disabled={isBusy}>
                 {isBusy ? (
                   <View style={styles.buttonBusyRow}>
@@ -1146,19 +1516,16 @@ export default function App() {
                             ]}
                           />
                         </View>
-                        <Text style={styles.listCardText}>
-                          {score.processing_status === "needs_conversion"
+                      <Text style={styles.listCardText}>
+                        {score.processing_status === "needs_conversion"
                             ? "PDF conversion to MusicXML is still required before SATB parsing."
                             : score.analysis
                               ? `Accuracy ${score.extraction_accuracy}%`
                               : "Stored in system. Parsing has not started yet."}
-                        </Text>
-                      </View>
-                      {score.analysis ? (
-                        <View style={styles.analysisBlock}>
-                          <Text style={styles.analysisMeta}>
-                            Parser: {score.analysis.parser_used} | Source: {score.analysis.source_format}
-                          </Text>
+                      </Text>
+                    </View>
+                    {score.analysis ? (
+                      <View style={styles.analysisBlock}>
                           <View style={styles.analysisChips}>
                             {score.analysis.voices.map((voice) => (
                               <View key={`${score.id}-${voice.voice_part}`} style={styles.analysisChip}>
@@ -1177,13 +1544,9 @@ export default function App() {
                             ))}
                           </View>
                           {score.analysis.warnings.length ? (
-                            <View style={styles.warningStack}>
-                              {score.analysis.warnings.map((warning) => (
-                                <Text key={`${score.id}-${warning}`} style={styles.warningText}>
-                                  {warning}
-                                </Text>
-                              ))}
-                            </View>
+                            <Text style={styles.listCardText}>
+                              Some score details still need review before the cleanest playback.
+                            </Text>
                           ) : null}
                         </View>
                       ) : null}
@@ -1224,7 +1587,10 @@ export default function App() {
                               : "Parse Score"}
                         </Text>
                       </Pressable>
-                      <Pressable style={styles.ghostButton} onPress={() => void removeScore(score.id)}>
+                      <Pressable
+                        style={styles.ghostButton}
+                        onPress={() => confirmRemoveScore(score.id, score.title)}
+                      >
                         <Text style={styles.ghostButtonLabel}>Delete</Text>
                       </Pressable>
                     </View>
@@ -1604,6 +1970,8 @@ export default function App() {
                     <Text style={styles.transportSubtitle}>
                       {isPracticeRecording
                         ? "Recording in progress..."
+                        : isPracticePlaying
+                        ? "Playing your selected take in the background"
                         : practiceRecordingUri
                         ? `Recorded ${formatDuration(practiceRecordingDurationMs)}`
                         : "No recording yet"}
@@ -1663,11 +2031,78 @@ export default function App() {
                       <Text style={styles.analysisChipText}>
                         Recording {formatDuration(practiceResult.duration_ms)} | Reference {formatDuration(practiceResult.reference_duration_ms)}
                       </Text>
-                      <Text style={styles.analysisChipText}>
-                        Method: {practiceResult.analysis_method}
-                      </Text>
                     </View>
                   ) : null}
+                </View>
+                <View style={styles.exportPanel}>
+                  <Text style={styles.transportTitle}>Recorded Voices</Text>
+                  {practiceRecordings.length === 0 ? (
+                    <Text style={styles.listCardText}>
+                      Your saved practice takes will appear here after analysis.
+                    </Text>
+                  ) : (
+                    <View style={styles.stack}>
+                      {practiceRecordings.map((recording) => {
+                        const isActiveTake = activePracticePlaybackId === recording.id;
+                        return (
+                          <View key={recording.id} style={styles.practiceRecordingCard}>
+                            <View style={styles.practiceRecordingCopy}>
+                              <Text style={styles.practiceRecordingTitle}>{recording.score_title}</Text>
+                              <Text style={styles.practiceRecordingMeta}>
+                                {recording.voice_part} | Accuracy {recording.accuracy_percent}% | {formatDuration(recording.duration_ms)}
+                              </Text>
+                            </View>
+                            <View style={styles.practiceRecordingActions}>
+                              <Pressable
+                                style={[
+                                  styles.voiceSelectButton,
+                                  isActiveTake && isPracticePlaying
+                                    ? styles.voiceSelectButtonActive
+                                    : styles.voiceSelectButtonInactive,
+                                ]}
+                                onPress={() => void playSavedPracticeRecording(recording)}
+                              >
+                                <Text
+                                  style={[
+                                    styles.voiceSelectButtonLabel,
+                                    isActiveTake && isPracticePlaying ? styles.voiceSelectButtonLabelActive : null,
+                                  ]}
+                                >
+                                  Play
+                                </Text>
+                              </Pressable>
+                              <Pressable
+                                style={[
+                                  styles.voiceSelectButton,
+                                  isActiveTake && !isPracticePlaying
+                                    ? styles.voiceSelectButtonActive
+                                    : styles.voiceSelectButtonInactive,
+                                ]}
+                                onPress={() => void pausePracticePlayback()}
+                              >
+                                <Text
+                                  style={[
+                                    styles.voiceSelectButtonLabel,
+                                    isActiveTake && !isPracticePlaying && practiceSound
+                                      ? styles.voiceSelectButtonLabelActive
+                                      : null,
+                                  ]}
+                                >
+                                  Pause
+                                </Text>
+                              </Pressable>
+                              <Pressable
+                                style={[styles.voiceSelectButton, styles.voiceSelectButtonInactive]}
+                                onPress={() => confirmDeletePracticeRecording(recording)}
+                              >
+                                <Text style={styles.voiceSelectButtonLabel}>Delete</Text>
+                              </Pressable>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
                 </View>
               </View>
             </View>
@@ -1685,13 +2120,11 @@ export default function App() {
                 note={currentUser?.email || signInEmail || signUpEmail || "Account email pending"}
               />
               <SummaryCard label="Assigned Part" value={selectedPart} note={selectedVoice.range} />
-              {aiStatus ? (
-                <SummaryCard
-                  label="AI Parser"
-                  value={aiStatus.model_backend}
-                  note={aiStatus.note}
-                />
-              ) : null}
+              <SummaryCard
+                label="Saved Scores"
+                value={`${scores.length}`}
+                note="stored with your account even after you sign out"
+              />
               <Pressable
                 style={styles.secondaryButton}
                 onPress={() => {
@@ -1700,7 +2133,9 @@ export default function App() {
                   setCurrentUser(null);
                   setIsAuthenticated(false);
                   setScores([]);
+                  setPracticeRecordings([]);
                   setApiError("");
+                  setSuccessMessage("");
                 }}
               >
                 <Text style={styles.secondaryButtonLabel}>Sign Out</Text>
@@ -1708,7 +2143,128 @@ export default function App() {
             </View>
           </View>
         ) : null}
+        {activePlaybackScore && selectedPlaybackVoice && sound ? (
+          <View style={styles.bottomDock}>
+            <View style={styles.bottomDockCopy}>
+              <Text style={styles.bottomDockLabel}>Now Playing</Text>
+              <Text style={styles.bottomDockValue}>
+                {activePlaybackScore.title} | {selectedPlaybackVoice}
+              </Text>
+            </View>
+            <View style={styles.bottomDockTransport}>
+              <Pressable
+                style={[
+                  styles.bottomDockButton,
+                  transportState === "play" ? styles.bottomDockButtonPrimary : styles.bottomDockButtonMuted,
+                ]}
+                onPress={() => void resumePlayback()}
+              >
+                <Text
+                  style={
+                    transportState === "play"
+                      ? styles.bottomDockButtonTextPrimary
+                      : styles.bottomDockButtonText
+                  }
+                >
+                  Play
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.bottomDockButton,
+                  transportState === "pause" ? styles.bottomDockButtonPrimary : styles.bottomDockButtonMuted,
+                ]}
+                onPress={() => void pausePlayback()}
+              >
+                <Text
+                  style={
+                    transportState === "pause"
+                      ? styles.bottomDockButtonTextPrimary
+                      : styles.bottomDockButtonText
+                  }
+                >
+                  Pause
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.bottomDockButton,
+                  transportState === "stop" ? styles.bottomDockButtonPrimary : styles.bottomDockButtonMuted,
+                ]}
+                onPress={() => void stopPlayback()}
+              >
+                <Text
+                  style={
+                    transportState === "stop"
+                      ? styles.bottomDockButtonTextPrimary
+                      : styles.bottomDockButtonText
+                  }
+                >
+                  Stop
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : practiceSound && activePracticeRecording ? (
+          <View style={styles.bottomDock}>
+            <View style={styles.bottomDockCopy}>
+              <Text style={styles.bottomDockLabel}>Practice Take</Text>
+              <Text style={styles.bottomDockValue}>
+                {activePracticeRecording.score_title} | {activePracticeRecording.voice_part}
+              </Text>
+            </View>
+            <View style={styles.bottomDockTransport}>
+              <Pressable
+                style={[
+                  styles.bottomDockButton,
+                  isPracticePlaying ? styles.bottomDockButtonPrimary : styles.bottomDockButtonMuted,
+                ]}
+                onPress={() =>
+                  void (
+                    practiceSound
+                      ? practiceSound.playAsync().then(() => setIsPracticePlaying(true))
+                      : Promise.resolve()
+                  )
+                }
+              >
+                <Text
+                  style={
+                    isPracticePlaying
+                      ? styles.bottomDockButtonTextPrimary
+                      : styles.bottomDockButtonText
+                  }
+                >
+                  Play
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.bottomDockButton,
+                  !isPracticePlaying ? styles.bottomDockButtonPrimary : styles.bottomDockButtonMuted,
+                ]}
+                onPress={() => void pausePracticePlayback()}
+              >
+                <Text
+                  style={
+                    !isPracticePlaying
+                      ? styles.bottomDockButtonTextPrimary
+                      : styles.bottomDockButtonText
+                  }
+                >
+                  Pause
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.bottomDockButton, styles.bottomDockButtonMuted]}
+                onPress={() => void stopPracticePlayback()}
+              >
+                <Text style={styles.bottomDockButtonText}>Stop</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
       </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -1823,10 +2379,27 @@ function sanitizeFileNameSegment(value: string) {
   return value.replace(/[^a-zA-Z0-9-_]+/g, "_").replace(/^_+|_+$/g, "") || "score";
 }
 
+function getFriendlyMessage(message: string) {
+  const lowered = message.toLowerCase();
+  if (lowered.includes("network request failed") || lowered.includes("timed out")) {
+    return "The app is having trouble reaching the server right now. Check the backend connection and try again.";
+  }
+  if (lowered.includes("microphone")) {
+    return "Microphone access is needed before practice recording can start.";
+  }
+  if (lowered.includes("password")) {
+    return message;
+  }
+  return "Something needs attention. Please try again, and if it continues, restart the app and backend.";
+}
+
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: "#07111F",
+  },
+  keyboardWrap: {
+    flex: 1,
   },
   container: {
     paddingHorizontal: 18,
@@ -2083,6 +2656,24 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: "#F3D3CC",
+    fontSize: 14,
+    lineHeight: 22,
+  },
+  successCard: {
+    borderRadius: 24,
+    backgroundColor: "#163125",
+    padding: 18,
+    borderWidth: 1,
+    borderColor: "#2F6B4E",
+  },
+  successTitle: {
+    color: "#B8F1CF",
+    fontSize: 14,
+    fontWeight: "800",
+    marginBottom: 6,
+  },
+  successText: {
+    color: "#D9F7E7",
     fontSize: 14,
     lineHeight: 22,
   },
@@ -2697,6 +3288,27 @@ const styles = StyleSheet.create({
     color: "#F7F3EA",
     fontSize: 15,
   },
+  searchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  searchInput: {
+    flex: 1,
+  },
+  searchButton: {
+    borderRadius: 18,
+    backgroundColor: "#162743",
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderWidth: 1,
+    borderColor: "#294066",
+  },
+  searchButtonLabel: {
+    color: "#D6E4F6",
+    fontSize: 13,
+    fontWeight: "800",
+  },
   primaryButton: {
     marginTop: 6,
     borderRadius: 999,
@@ -2737,6 +3349,33 @@ const styles = StyleSheet.create({
     color: "#D6E4F6",
     fontSize: 15,
     fontWeight: "800",
+  },
+  practiceRecordingCard: {
+    borderRadius: 18,
+    backgroundColor: "#132238",
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "#233655",
+    gap: 12,
+  },
+  practiceRecordingCopy: {
+    flex: 1,
+    gap: 6,
+  },
+  practiceRecordingTitle: {
+    color: "#F7F3EA",
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  practiceRecordingMeta: {
+    color: "#9FB2CA",
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  practiceRecordingActions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
   },
   inlineError: {
     borderRadius: 18,

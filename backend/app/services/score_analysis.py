@@ -42,7 +42,7 @@ class ParsedTone:
 
 def analyze_score_file(file_path: Path, source_format: str) -> ScoreAnalysisResult:
     normalized_format = source_format.upper()
-    parser_used = "music21+staff-stem"
+    parser_used = "music21+staff-position"
     warnings: list[str] = []
     parse_target = file_path
 
@@ -151,29 +151,16 @@ def _classify_note_assignments(current_note: note.Note) -> list[tuple[str, str]]
     if named_part:
         return [(named_part, "part-name")]
 
+    explicit_staff_voice = _explicit_staff_voice(current_note)
+    if explicit_staff_voice:
+        return [(explicit_staff_voice, "staff-order")]
+
     pair_name = _resolve_staff_pair_name(current_note)
-    voice_hint = (_get_source_voice(current_note) or "").strip()
-    stem_direction = _normalize_stem_direction(getattr(current_note, "stemDirection", None))
-    midi_value = int(current_note.pitch.midi)
 
     if pair_name is not None:
-        upper_voice, lower_voice = STAFF_VOICE_PAIRS[pair_name]
+        return _classify_event_note_assignments(current_note, pair_name)
 
-        if voice_hint == "1":
-            return [(upper_voice, "voice-id")]
-        if voice_hint == "2":
-            return [(lower_voice, "voice-id")]
-
-        if _is_unison_context(current_note, pair_name):
-            return [(upper_voice, "staff-unison"), (lower_voice, "staff-unison")]
-
-        if stem_direction == "up":
-            return [(upper_voice, "staff-stem")]
-        if stem_direction == "down":
-            return [(lower_voice, "staff-stem")]
-
-        return [(_classify_with_pair(current_note, midi_value, pair_name), "staff-pitch")]
-
+    midi_value = int(current_note.pitch.midi)
     predicted = predict_voice_label(feature_vector_from_note(current_note))
     if predicted is not None:
         return [(predicted, "ml-fallback")]
@@ -187,41 +174,16 @@ def _classify_chord_assignments(current_chord: chord.Chord) -> list[tuple[pitch.
     if named_part:
         return [(current_pitch, named_part, "part-name") for current_pitch in current_chord.pitches]
 
+    explicit_staff_voice = _explicit_staff_voice(current_chord)
+    if explicit_staff_voice:
+        return [(current_pitch, explicit_staff_voice, "staff-order") for current_pitch in current_chord.pitches]
+
     pair_name = _resolve_staff_pair_name(current_chord)
-    voice_hint = (_get_source_voice(current_chord) or "").strip()
-    stem_direction = _normalize_stem_direction(getattr(current_chord, "stemDirection", None))
-    ordered_pitches = sorted(current_chord.pitches, key=lambda current_pitch: current_pitch.midi)
 
     if pair_name is not None:
-        upper_voice, lower_voice = STAFF_VOICE_PAIRS[pair_name]
+        return _classify_event_chord_assignments(current_chord, pair_name)
 
-        if voice_hint == "1":
-            return [(current_pitch, upper_voice, "voice-id") for current_pitch in ordered_pitches]
-        if voice_hint == "2":
-            return [(current_pitch, lower_voice, "voice-id") for current_pitch in ordered_pitches]
-
-        if len(ordered_pitches) == 1:
-            only_pitch = ordered_pitches[0]
-            return [
-                (only_pitch, upper_voice, "staff-unison"),
-                (only_pitch, lower_voice, "staff-unison"),
-            ]
-
-        if stem_direction == "up":
-            return [(current_pitch, upper_voice, "staff-stem") for current_pitch in ordered_pitches]
-        if stem_direction == "down":
-            return [(current_pitch, lower_voice, "staff-stem") for current_pitch in ordered_pitches]
-
-        assignments: list[tuple[pitch.Pitch, str, str]] = [
-            (ordered_pitches[-1], upper_voice, "staff-chord"),
-            (ordered_pitches[0], lower_voice, "staff-chord"),
-        ]
-        if len(ordered_pitches) > 2:
-            for middle_pitch in ordered_pitches[1:-1]:
-                assigned_voice = _classify_with_pair(current_chord, int(middle_pitch.midi), pair_name)
-                assignments.append((middle_pitch, assigned_voice, "staff-pitch"))
-        return assignments
-
+    ordered_pitches = sorted(current_chord.pitches, key=lambda current_pitch: current_pitch.midi)
     assignments = []
     for current_pitch in ordered_pitches:
         predicted = predict_voice_label(feature_vector_from_note(current_chord, int(current_pitch.midi)))
@@ -273,32 +235,71 @@ def _resolve_staff_pair_name(current_note: note.NotRest) -> str | None:
     return None
 
 
-def _classify_with_pair(current_note: note.NotRest, midi_value: int, pair_name: str) -> str:
+def _classify_event_note_assignments(current_note: note.Note, pair_name: str) -> list[tuple[str, str]]:
+    event_pitches = _event_pitches_for_staff_moment(current_note, pair_name)
+    if not event_pitches:
+        return [(_primary_voice_for_pair(pair_name), "staff-single-line")]
+
+    midi_value = int(current_note.pitch.midi)
+    return _assign_event_pitch_roles(current_note, midi_value, event_pitches, pair_name)
+
+
+def _classify_event_chord_assignments(
+    current_chord: chord.Chord,
+    pair_name: str,
+) -> list[tuple[pitch.Pitch, str, str]]:
+    event_pitches = _event_pitches_for_staff_moment(current_chord, pair_name)
+    if not event_pitches:
+        return [
+            (current_pitch, _primary_voice_for_pair(pair_name), "staff-single-line")
+            for current_pitch in sorted(current_chord.pitches, key=lambda item: item.midi)
+        ]
+
+    assignments: list[tuple[pitch.Pitch, str, str]] = []
+    for current_pitch in sorted(current_chord.pitches, key=lambda item: item.midi):
+        for assigned_voice, classifier_used in _assign_event_pitch_roles(
+            current_chord,
+            int(current_pitch.midi),
+            event_pitches,
+            pair_name,
+        ):
+            assignments.append((current_pitch, assigned_voice, classifier_used))
+    return assignments
+
+
+def _assign_event_pitch_roles(
+    current_note: note.NotRest,
+    midi_value: int,
+    event_pitches: list[int],
+    pair_name: str,
+) -> list[tuple[str, str]]:
     upper_voice, lower_voice = STAFF_VOICE_PAIRS[pair_name]
-    predicted = predict_voice_label(feature_vector_from_note(current_note, midi_value))
-    if predicted in {upper_voice, lower_voice}:
-        return predicted
+    highest_pitch = max(event_pitches)
+    lowest_pitch = min(event_pitches)
+
+    if _is_monophonic_passage(current_note, pair_name):
+        return [(_primary_voice_for_pair(pair_name), "staff-single-line")]
+
+    if len(event_pitches) == 1:
+        return [(upper_voice, "staff-unison"), (lower_voice, "staff-unison")]
+
+    if midi_value >= highest_pitch:
+        return [(upper_voice, "staff-position")]
+
+    if midi_value <= lowest_pitch:
+        return [(lower_voice, "staff-position")]
 
     upper_midpoint = sum(SATB_RANGES[upper_voice]) / 2
     lower_midpoint = sum(SATB_RANGES[lower_voice]) / 2
     if abs(midi_value - upper_midpoint) <= abs(midi_value - lower_midpoint):
-        return upper_voice
-    return lower_voice
+        return [(upper_voice, "staff-position")]
+    return [(lower_voice, "staff-position")]
 
 
-def _normalize_stem_direction(stem_direction: str | None) -> str | None:
-    if stem_direction is None:
-        return None
-    lowered = stem_direction.strip().lower()
-    if lowered in {"up", "down"}:
-        return lowered
-    return None
-
-
-def _is_unison_context(current_note: note.Note, pair_name: str) -> bool:
+def _event_pitches_for_staff_moment(current_note: note.NotRest, pair_name: str) -> list[int]:
     measure = current_note.getContextByClass(stream.Measure)
     if measure is None:
-        return False
+        return []
 
     same_time_items = [
         item
@@ -306,7 +307,40 @@ def _is_unison_context(current_note: note.Note, pair_name: str) -> bool:
         if abs(float(item.offset) - float(current_note.offset)) < 1e-6
         and _resolve_staff_pair_name(item) == pair_name
     ]
-    return len(same_time_items) == 1
+    collected_midis: list[int] = []
+    for item in same_time_items:
+        if isinstance(item, note.Note):
+            collected_midis.append(int(item.pitch.midi))
+        elif isinstance(item, chord.Chord):
+            collected_midis.extend(int(current_pitch.midi) for current_pitch in item.pitches)
+
+    return sorted(collected_midis)
+
+
+def _is_monophonic_passage(current_note: note.NotRest, pair_name: str) -> bool:
+    measure = current_note.getContextByClass(stream.Measure)
+    if measure is None:
+        return False
+
+    same_clef_items = [
+        item for item in measure.notes if _resolve_staff_pair_name(item) == pair_name
+    ]
+    if not same_clef_items:
+        return False
+
+    return all(_note_event_pitch_count(item) == 1 for item in same_clef_items)
+
+
+def _note_event_pitch_count(current_note: note.NotRest) -> int:
+    if isinstance(current_note, note.Note):
+        return 1
+    if isinstance(current_note, chord.Chord):
+        return len(current_note.pitches)
+    return 0
+
+
+def _primary_voice_for_pair(pair_name: str) -> str:
+    return "Soprano" if pair_name == "treble" else "Tenor"
 
 
 def _voice_from_part_name(part_name: str) -> str | None:
@@ -316,6 +350,65 @@ def _voice_from_part_name(part_name: str) -> str | None:
             return voice_name.capitalize()
 
     return None
+
+
+def _explicit_staff_voice(current_note: note.NotRest) -> str | None:
+    explicit_staff_map = _explicit_staff_number_voice_map(current_note)
+    source_staff = _get_source_staff(current_note)
+    if source_staff and source_staff in explicit_staff_map:
+        return explicit_staff_map[source_staff]
+
+    part_stream = current_note.getContextByClass(stream.Part)
+    score_stream = current_note.getContextByClass(stream.Score)
+    if part_stream is None or score_stream is None:
+        return None
+
+    ordered_parts = list(score_stream.parts)
+    if len(ordered_parts) < 4:
+        return None
+
+    try:
+        part_index = ordered_parts.index(part_stream)
+    except ValueError:
+        return None
+
+    current_clef = current_note.getContextByClass(clef.Clef)
+    if part_index == 0 and isinstance(current_clef, clef.TrebleClef):
+        return "Soprano"
+    if part_index == 1 and isinstance(current_clef, clef.TrebleClef):
+        return "Alto"
+    if part_index == 2 and isinstance(current_clef, clef.BassClef):
+        return "Tenor"
+    if part_index == 3 and isinstance(current_clef, clef.BassClef):
+        return "Bass"
+
+    return None
+
+
+def _explicit_staff_number_voice_map(current_note: note.NotRest) -> dict[str, str]:
+    score_stream = current_note.getContextByClass(stream.Score)
+    if score_stream is None:
+        return {}
+
+    staff_numbers = sorted(
+        {
+            staff_number
+            for item in score_stream.recurse().notes
+            for staff_number in [_get_source_staff(item)]
+            if staff_number and staff_number.isdigit()
+        },
+        key=int,
+    )
+
+    if len(staff_numbers) < 4:
+        return {}
+
+    return {
+        staff_numbers[0]: "Soprano",
+        staff_numbers[1]: "Alto",
+        staff_numbers[2]: "Tenor",
+        staff_numbers[3]: "Bass",
+    }
 
 
 def _get_source_voice(current_note: note.NotRest) -> str | None:

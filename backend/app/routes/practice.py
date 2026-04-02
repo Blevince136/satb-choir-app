@@ -5,7 +5,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+import shutil
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 
 from app.routes.scores import _find_score
 from app.schemas import PracticeRecordingResponse, UserResponse
@@ -59,10 +61,16 @@ def _score_practice_take(recording_duration_ms: int, reference_duration_ms: int)
     if recording_duration_ms <= 0 or reference_duration_ms <= 0:
         return 0, "The recording or reference audio duration could not be measured."
 
-    duration_ratio = min(recording_duration_ms, reference_duration_ms) / max(recording_duration_ms, reference_duration_ms)
+    # Trim rough capture edges so button taps and room noise count less than the singer's sustained voice.
+    effective_recording_ms = max(recording_duration_ms - 1200, 0)
+    effective_reference_ms = max(reference_duration_ms - 400, 0)
+    if effective_recording_ms <= 0 or effective_reference_ms <= 0:
+        return 0, "The recording was too short to evaluate clearly. Try recording a fuller sung phrase."
+
+    duration_ratio = min(effective_recording_ms, effective_reference_ms) / max(effective_recording_ms, effective_reference_ms)
     duration_score = int(round(duration_ratio * 100))
 
-    difference_ms = abs(recording_duration_ms - reference_duration_ms)
+    difference_ms = abs(effective_recording_ms - effective_reference_ms)
     if duration_score >= 92:
         feedback = "Excellent timing match with the generated voice part."
     elif duration_score >= 78:
@@ -72,8 +80,15 @@ def _score_practice_take(recording_duration_ms: int, reference_duration_ms: int)
     else:
         feedback = "The timing differs a lot from the generated voice. Try singing along more closely with the reference."
 
-    feedback = f"{feedback} Duration gap: {difference_ms} ms."
+    feedback = f"{feedback} Duration gap: {difference_ms} ms after trimming recording-edge noise."
     return duration_score, feedback
+
+
+def _find_practice_recording(recording_id: str, owner_id: str) -> PracticeRecordingResponse:
+    for item in practice_items:
+        if item.id == recording_id and item.owner_id == owner_id:
+            return item
+    raise HTTPException(status_code=404, detail="Practice recording not found.")
 
 
 @router.get("/recordings", response_model=list[PracticeRecordingResponse])
@@ -132,3 +147,42 @@ async def upload_practice_recording(
     practice_items.insert(0, record)
     _save_practice_items()
     return record
+
+
+@router.get("/recordings/{recording_id}/audio")
+async def get_practice_recording_audio(
+    recording_id: str,
+    current_user: UserResponse = Depends(get_current_user),
+) -> Response:
+    record = _find_practice_recording(recording_id, current_user.id)
+    recording_path = Path(record.recording_uri)
+    if not recording_path.exists():
+        raise HTTPException(status_code=404, detail="Practice audio file is missing.")
+
+    media_type = "audio/mp4"
+    if recording_path.suffix.lower() in {".wav"}:
+        media_type = "audio/wav"
+    elif recording_path.suffix.lower() in {".m4a", ".aac"}:
+        media_type = "audio/mp4"
+
+    return Response(
+        content=recording_path.read_bytes(),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{recording_path.name}"',
+        },
+    )
+
+
+@router.delete("/recordings/{recording_id}")
+async def delete_practice_recording(
+    recording_id: str,
+    current_user: UserResponse = Depends(get_current_user),
+) -> dict[str, str]:
+    record = _find_practice_recording(recording_id, current_user.id)
+    practice_items.remove(record)
+    recording_path = Path(record.recording_uri)
+    if recording_path.exists():
+        shutil.rmtree(recording_path.parent, ignore_errors=True)
+    _save_practice_items()
+    return {"status": "deleted"}

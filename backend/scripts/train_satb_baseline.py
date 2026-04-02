@@ -74,8 +74,10 @@ def main() -> None:
     test_groups = sorted({groups[index] for index in test_indices})
 
     classifier = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=12,
+        n_estimators=400,
+        max_depth=16,
+        min_samples_leaf=2,
+        class_weight="balanced_subsample",
         random_state=42,
     )
     classifier.fit(x_train, y_train)
