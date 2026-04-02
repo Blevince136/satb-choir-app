@@ -34,6 +34,21 @@ type AiStatusResponse = {
   note: string;
 };
 
+type StorageStatusResponse = {
+  backend: string;
+  database_name: string;
+  migration_version: number | null;
+  migration_completed: boolean;
+  legacy_json_files_remaining: string[];
+  archived_legacy_json_files: string[];
+  counts: {
+    users: number;
+    sessions: number;
+    scores: number;
+    practice_recordings: number;
+  };
+};
+
 type Score = {
   id: string;
   title: string;
@@ -183,6 +198,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>("Home");
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatusResponse | null>(null);
+  const [storageStatus, setStorageStatus] = useState<StorageStatusResponse | null>(null);
   const [apiError, setApiError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [isBusy, setIsBusy] = useState(false);
@@ -228,9 +244,10 @@ export default function App() {
 
     async function fetchHealthAndAi() {
       try {
-        const [healthResponse, aiResponse] = await Promise.all([
+        const [healthResponse, aiResponse, storageResponse] = await Promise.all([
           fetch(`${API_BASE_URL}/api/health`),
           fetch(`${API_BASE_URL}/api/ai/status`),
+          fetch(`${API_BASE_URL}/api/health/storage/status`),
         ]);
 
         if (!healthResponse.ok) {
@@ -241,9 +258,13 @@ export default function App() {
         const aiStatusData = aiResponse.ok
           ? ((await aiResponse.json()) as AiStatusResponse)
           : null;
+        const storageData = storageResponse.ok
+          ? ((await storageResponse.json()) as StorageStatusResponse)
+          : null;
         if (active) {
           setHealth(healthData);
           setAiStatus(aiStatusData);
+          setStorageStatus(storageData);
           setApiError("");
         }
       } catch (error) {
@@ -2125,6 +2146,35 @@ export default function App() {
                 value={`${scores.length}`}
                 note="stored with your account even after you sign out"
               />
+              <SummaryCard
+                label="Data Storage"
+                value={
+                  storageStatus?.backend === "mongodb" && storageStatus?.migration_completed
+                    ? "MongoDB Active"
+                    : "Storage Loading"
+                }
+                note={
+                  storageStatus
+                    ? `${storageStatus.counts.scores} scores, ${storageStatus.counts.practice_recordings} practice takes, ${storageStatus.counts.users} users`
+                    : "Checking connected database"
+                }
+              />
+              {storageStatus?.migration_completed ? (
+                <View style={styles.statusPanel}>
+                  <Text style={styles.analysisMeta}>
+                    Account data is now loaded from MongoDB database `{storageStatus.database_name}`.
+                  </Text>
+                  {storageStatus.legacy_json_files_remaining.length ? (
+                    <Text style={styles.warningText}>
+                      Legacy JSON files still present: {storageStatus.legacy_json_files_remaining.length}
+                    </Text>
+                  ) : (
+                    <Text style={styles.analysisMeta}>
+                      Legacy JSON files archived successfully after migration.
+                    </Text>
+                  )}
+                </View>
+              ) : null}
               <Pressable
                 style={styles.secondaryButton}
                 onPress={() => {

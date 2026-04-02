@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     app_name: str = "SATB Choir API"
     environment: str = "development"
     api_prefix: str = "/api"
-    mongodb_uri: str = "mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority"
+    mongodb_uri: str = "mongodb://127.0.0.1:27017"
     mongodb_db_name: str = "satb_choir_app"
     # In development, allow frontend + emulator + expo origins.
     # For production, use explicit origins only.

@@ -2,70 +2,40 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from fastapi import Header, HTTPException, status
 
+from app.database import get_sessions_collection, get_users_collection, mongo_to_dict
 from app.schemas import UserResponse
 
 PASSWORD_ITERATIONS = 120_000
 SESSION_DURATION_DAYS = 30
-AUTH_ROOT = Path(__file__).resolve().parents[2] / "storage" / "auth"
-AUTH_ROOT.mkdir(parents=True, exist_ok=True)
-USERS_FILE = AUTH_ROOT / "users.json"
-SESSIONS_FILE = AUTH_ROOT / "sessions.json"
 
 
-def _load_records(target_file: Path) -> list[dict]:
-    if not target_file.exists():
-        return []
-    try:
-        return json.loads(target_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-
-
-def _save_records(target_file: Path, items: list[dict]) -> None:
-    target_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
-
-
-def load_users() -> list[dict]:
-    return _load_records(USERS_FILE)
-
-
-def save_users(items: list[dict]) -> None:
-    _save_records(USERS_FILE, items)
-
-
-def load_sessions() -> list[dict]:
-    return _load_records(SESSIONS_FILE)
-
-
-def save_sessions(items: list[dict]) -> None:
-    _save_records(SESSIONS_FILE, items)
-
-
-def save_reset_code_for_email(email: str) -> str:
-    users = load_users()
-    user = next((item for item in users if item["email"] == email.lower()), None)
+async def save_reset_code_for_email(email: str) -> str:
+    user = mongo_to_dict(await get_users_collection().find_one({"email": email.lower()}))
     if user is None:
         return ""
 
     reset_code = f"{secrets.randbelow(900000) + 100000}"
-    user["password_reset_code_hash"] = hash_session_token(reset_code)
-    user["password_reset_expires_at"] = (datetime.now(UTC) + timedelta(minutes=15)).isoformat()
-    save_users(users)
+    await get_users_collection().update_one(
+        {"id": user["id"]},
+        {
+            "$set": {
+                "password_reset_code_hash": hash_session_token(reset_code),
+                "password_reset_expires_at": (datetime.now(UTC) + timedelta(minutes=15)).isoformat(),
+            }
+        },
+    )
     return reset_code
 
 
-def reset_password_with_code(email: str, reset_code: str, new_password: str) -> None:
+async def reset_password_with_code(email: str, reset_code: str, new_password: str) -> None:
     validate_password_strength(new_password)
-    users = load_users()
-    user = next((item for item in users if item["email"] == email.lower()), None)
+    user = mongo_to_dict(await get_users_collection().find_one({"email": email.lower()}))
     if user is None:
         raise HTTPException(status_code=404, detail="Account not found.")
 
@@ -81,10 +51,16 @@ def reset_password_with_code(email: str, reset_code: str, new_password: str) -> 
     if hash_session_token(reset_code.strip()) != reset_hash:
         raise HTTPException(status_code=400, detail="The reset code is invalid.")
 
-    user["password_hash"] = hash_password(new_password)
-    user.pop("password_reset_code_hash", None)
-    user.pop("password_reset_expires_at", None)
-    save_users(users)
+    await get_users_collection().update_one(
+        {"id": user["id"]},
+        {
+            "$set": {"password_hash": hash_password(new_password)},
+            "$unset": {
+                "password_reset_code_hash": "",
+                "password_reset_expires_at": "",
+            },
+        },
+    )
 
 
 def validate_password_strength(password: str) -> None:
@@ -128,16 +104,15 @@ def hash_session_token(token: str) -> str:
 
 async def create_session_token(user_id: str) -> str:
     raw_token = secrets.token_urlsafe(48)
-    sessions = load_sessions()
-    sessions.append(
+    await get_sessions_collection().insert_one(
         {
+            "id": secrets.token_hex(12),
             "token_hash": hash_session_token(raw_token),
             "user_id": user_id,
             "created_at": datetime.now(UTC).isoformat(),
             "expires_at": (datetime.now(UTC) + timedelta(days=SESSION_DURATION_DAYS)).isoformat(),
         }
     )
-    save_sessions(sessions)
     return raw_token
 
 
@@ -147,19 +122,17 @@ async def get_current_user(authorization: str | None = Header(default=None)) -> 
 
     token = authorization.split(" ", 1)[1].strip()
     token_hash = hash_session_token(token)
-    sessions = load_sessions()
-    session = next((item for item in sessions if item.get("token_hash") == token_hash), None)
+    session = mongo_to_dict(await get_sessions_collection().find_one({"token_hash": token_hash}))
     if not session:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session token.")
 
     expires_at_text = session.get("expires_at")
     expires_at = datetime.fromisoformat(expires_at_text) if expires_at_text else None
     if expires_at and expires_at < datetime.now(UTC):
-        save_sessions([item for item in sessions if item.get("token_hash") != token_hash])
+        await get_sessions_collection().delete_one({"token_hash": token_hash})
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired. Please sign in again.")
 
-    users = load_users()
-    user = next((item for item in users if item.get("id") == session.get("user_id")), None)
+    user = mongo_to_dict(await get_users_collection().find_one({"id": session.get("user_id")}))
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found for this session.")
 

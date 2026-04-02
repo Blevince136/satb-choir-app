@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -9,6 +8,7 @@ import shutil
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 
+from app.database import get_practice_collection, mongo_to_dict
 from app.routes.scores import _find_score
 from app.schemas import PracticeRecordingResponse, UserResponse
 from app.services.auth_service import get_current_user
@@ -18,32 +18,6 @@ router = APIRouter(prefix="/practice", tags=["practice"])
 
 PRACTICE_ROOT = Path(__file__).resolve().parents[2] / "storage" / "practice"
 PRACTICE_ROOT.mkdir(parents=True, exist_ok=True)
-PRACTICE_INDEX_FILE = PRACTICE_ROOT / "index.json"
-
-
-def _load_practice_items() -> list[PracticeRecordingResponse]:
-    if not PRACTICE_INDEX_FILE.exists():
-        return []
-    try:
-        payload = json.loads(PRACTICE_INDEX_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-
-    records: list[PracticeRecordingResponse] = []
-    for item in payload:
-        try:
-            records.append(PracticeRecordingResponse.model_validate(item))
-        except Exception:  # noqa: BLE001
-            continue
-    return records
-
-
-def _save_practice_items() -> None:
-    serialized = [item.model_dump(mode="json") for item in practice_items]
-    PRACTICE_INDEX_FILE.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
-
-
-practice_items: list[PracticeRecordingResponse] = _load_practice_items()
 
 
 def _reference_duration_ms(score_path: Path, score_format: str, voice_part: str, tempo: int) -> int:
@@ -84,10 +58,12 @@ def _score_practice_take(recording_duration_ms: int, reference_duration_ms: int)
     return duration_score, feedback
 
 
-def _find_practice_recording(recording_id: str, owner_id: str) -> PracticeRecordingResponse:
-    for item in practice_items:
-        if item.id == recording_id and item.owner_id == owner_id:
-            return item
+async def _find_practice_recording(recording_id: str, owner_id: str) -> PracticeRecordingResponse:
+    item = mongo_to_dict(
+        await get_practice_collection().find_one({"id": recording_id, "owner_id": owner_id})
+    )
+    if item is not None:
+        return PracticeRecordingResponse.model_validate(item)
     raise HTTPException(status_code=404, detail="Practice recording not found.")
 
 
@@ -95,7 +71,9 @@ def _find_practice_recording(recording_id: str, owner_id: str) -> PracticeRecord
 async def list_practice_recordings(
     current_user: UserResponse = Depends(get_current_user),
 ) -> list[PracticeRecordingResponse]:
-    return [item for item in practice_items if item.owner_id == current_user.id]
+    cursor = get_practice_collection().find({"owner_id": current_user.id}).sort("recorded_at", -1)
+    items = [mongo_to_dict(item) async for item in cursor]
+    return [PracticeRecordingResponse.model_validate(item) for item in items if item is not None]
 
 
 @router.post("/recordings", response_model=PracticeRecordingResponse)
@@ -107,7 +85,7 @@ async def upload_practice_recording(
     file: UploadFile = File(...),
     current_user: UserResponse = Depends(get_current_user),
 ) -> PracticeRecordingResponse:
-    score = _find_score(score_id, current_user.id)
+    score = await _find_score(score_id, current_user.id)
     if not score.stored_path:
         raise HTTPException(status_code=400, detail="Score file is not available for practice.")
 
@@ -144,8 +122,7 @@ async def upload_practice_recording(
         reference_duration_ms=reference_duration_ms,
         recorded_at=datetime.now(UTC),
     )
-    practice_items.insert(0, record)
-    _save_practice_items()
+    await get_practice_collection().insert_one(record.model_dump(mode="json"))
     return record
 
 
@@ -154,7 +131,7 @@ async def get_practice_recording_audio(
     recording_id: str,
     current_user: UserResponse = Depends(get_current_user),
 ) -> Response:
-    record = _find_practice_recording(recording_id, current_user.id)
+    record = await _find_practice_recording(recording_id, current_user.id)
     recording_path = Path(record.recording_uri)
     if not recording_path.exists():
         raise HTTPException(status_code=404, detail="Practice audio file is missing.")
@@ -179,10 +156,9 @@ async def delete_practice_recording(
     recording_id: str,
     current_user: UserResponse = Depends(get_current_user),
 ) -> dict[str, str]:
-    record = _find_practice_recording(recording_id, current_user.id)
-    practice_items.remove(record)
+    record = await _find_practice_recording(recording_id, current_user.id)
     recording_path = Path(record.recording_uri)
     if recording_path.exists():
         shutil.rmtree(recording_path.parent, ignore_errors=True)
-    _save_practice_items()
+    await get_practice_collection().delete_one({"id": recording_id, "owner_id": current_user.id})
     return {"status": "deleted"}

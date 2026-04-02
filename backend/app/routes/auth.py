@@ -14,14 +14,13 @@ from app.schemas import (
     UserRegisterRequest,
     UserResponse,
 )
+from app.database import get_users_collection, mongo_to_dict
 from app.services.auth_service import (
     create_session_token,
     get_current_user,
     hash_password,
-    load_users,
     reset_password_with_code,
     save_reset_code_for_email,
-    save_users,
     validate_password_strength,
     verify_password,
 )
@@ -32,14 +31,15 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 @router.post("/signup", response_model=AuthSessionResponse, status_code=status.HTTP_201_CREATED)
 async def sign_up(payload: UserRegisterRequest) -> AuthSessionResponse:
     validate_password_strength(payload.password)
-    users = load_users()
-    existing_user = next((item for item in users if item["email"] == payload.email.lower()), None)
+    existing_user = mongo_to_dict(
+        await get_users_collection().find_one({"email": payload.email.lower()})
+    )
     if existing_user:
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
     user_id = str(uuid4())
     now = datetime.now(UTC)
-    users.append(
+    await get_users_collection().insert_one(
         {
             "id": user_id,
             "full_name": payload.full_name.strip(),
@@ -48,7 +48,6 @@ async def sign_up(payload: UserRegisterRequest) -> AuthSessionResponse:
             "created_at": now.isoformat(),
         }
     )
-    save_users(users)
 
     access_token = await create_session_token(user_id)
     return AuthSessionResponse(
@@ -64,8 +63,7 @@ async def sign_up(payload: UserRegisterRequest) -> AuthSessionResponse:
 
 @router.post("/signin", response_model=AuthSessionResponse)
 async def sign_in(payload: UserLoginRequest) -> AuthSessionResponse:
-    users = load_users()
-    user = next((item for item in users if item["email"] == payload.email.lower()), None)
+    user = mongo_to_dict(await get_users_collection().find_one({"email": payload.email.lower()}))
     if not user or not verify_password(payload.password, user.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Incorrect email or password.")
 
@@ -88,7 +86,7 @@ async def get_me(current_user: UserResponse = Depends(get_current_user)) -> User
 
 @router.post("/forgot-password", response_model=ForgotPasswordResponse)
 async def forgot_password(payload: ForgotPasswordRequest) -> ForgotPasswordResponse:
-    reset_code = save_reset_code_for_email(payload.email)
+    reset_code = await save_reset_code_for_email(payload.email)
     return ForgotPasswordResponse(
         message="If this account exists, a reset code has been generated.",
         reset_code=reset_code or None,
@@ -97,5 +95,5 @@ async def forgot_password(payload: ForgotPasswordRequest) -> ForgotPasswordRespo
 
 @router.post("/reset-password")
 async def reset_password(payload: ResetPasswordRequest) -> dict[str, str]:
-    reset_password_with_code(payload.email, payload.reset_code, payload.new_password)
+    await reset_password_with_code(payload.email, payload.reset_code, payload.new_password)
     return {"message": "Password reset successful. You can now sign in."}
