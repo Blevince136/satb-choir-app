@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Platform,
@@ -183,6 +184,26 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
+async function readApiError(response: Response, fallback: string): Promise<string> {
+  try {
+    const text = await response.text();
+    if (!text) {
+      return fallback;
+    }
+    try {
+      const parsed = JSON.parse(text) as { detail?: string };
+      if (parsed.detail) {
+        return parsed.detail;
+      }
+    } catch {
+      // Keep the raw text fallback below.
+    }
+    return text;
+  } catch {
+    return fallback;
+  }
+}
+
 const tabs = ["Home", "Library", "Audio", "Practice", "Account"] as const;
 const authModes = ["signIn", "signUp"] as const;
 
@@ -295,11 +316,15 @@ export default function App() {
           return;
         }
 
-        const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
-          headers: {
-            Authorization: `Bearer ${storedToken}`,
-          },
-        });
+        const response = await withTimeout(
+          fetch(`${API_BASE_URL}/api/auth/me`, {
+            headers: {
+              Authorization: `Bearer ${storedToken}`,
+            },
+          }),
+          8000,
+          "Session restore timed out",
+        );
 
         if (!response.ok) {
           await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY);
@@ -312,10 +337,16 @@ export default function App() {
           setCurrentUser(user);
           setIsAuthenticated(true);
           setApiError("");
+          setSuccessMessage("Session restored successfully.");
         }
       } catch (error) {
+        await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY);
         if (active) {
-          setApiError(error instanceof Error ? error.message : "Unable to restore session.");
+          setApiError(
+            error instanceof Error
+              ? `${error.message}. Please sign in again if needed.`
+              : "Unable to restore session. Please sign in again if needed.",
+          );
         }
       } finally {
         if (active) {
@@ -453,18 +484,19 @@ export default function App() {
     [activePracticePlaybackId, activePracticeScore, practiceRecordings, practiceVoice],
   );
 
-  function authHeaders(): Record<string, string> {
-    return authToken
+  function authHeaders(tokenOverride?: string): Record<string, string> {
+    const token = tokenOverride ?? authToken;
+    return token
       ? {
-          Authorization: `Bearer ${authToken}`,
+          Authorization: `Bearer ${token}`,
         }
       : {};
   }
 
-  async function refreshScores() {
+  async function refreshScores(tokenOverride?: string): Promise<boolean> {
     try {
       const response = await fetch(`${API_BASE_URL}/api/scores`, {
-        headers: authHeaders(),
+        headers: authHeaders(tokenOverride),
       });
       if (!response.ok) {
         throw new Error(`Status ${response.status}`);
@@ -473,17 +505,19 @@ export default function App() {
       const data = (await response.json()) as Score[];
       setScores(data);
       setApiError("");
+      return true;
     } catch (error) {
       setApiError(
         error instanceof Error ? error.message : "Unable to refresh imported scores.",
       );
+      return false;
     }
   }
 
-  async function refreshPracticeRecordings() {
+  async function refreshPracticeRecordings(tokenOverride?: string): Promise<boolean> {
     try {
       const response = await fetch(`${API_BASE_URL}/api/practice/recordings`, {
-        headers: authHeaders(),
+        headers: authHeaders(tokenOverride),
       });
       if (!response.ok) {
         throw new Error(`Status ${response.status}`);
@@ -491,10 +525,12 @@ export default function App() {
 
       const data = (await response.json()) as PracticeRecordingResult[];
       setPracticeRecordings(data);
+      return true;
     } catch (error) {
       setApiError(
         error instanceof Error ? error.message : "Unable to refresh recorded practice takes.",
       );
+      return false;
     }
   }
 
@@ -529,17 +565,24 @@ export default function App() {
               password: signUpPassword,
             };
 
-      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
+      const response = await withTimeout(
+        fetch(`${API_BASE_URL}${endpoint}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        }),
+        12000,
+        "Authentication request timed out",
+      );
 
       if (!response.ok) {
-        const message = await response.text();
-        throw new Error(message || `Authentication failed (${response.status}).`);
+        const message = await readApiError(
+          response,
+          `Authentication failed (${response.status}).`,
+        );
+        throw new Error(message);
       }
 
       const session = (await response.json()) as AuthSessionResponse;
@@ -549,14 +592,19 @@ export default function App() {
       setIsAuthenticated(true);
       setActiveTab("Home");
       setApiError("");
-      await refreshScores();
+      await refreshScores(session.access_token);
+      await refreshPracticeRecordings(session.access_token);
       setSuccessMessage(
         authMode === "signIn"
           ? "Welcome back. Your saved scores are ready in your library."
           : "Account created successfully. Your library will stay with this account.",
       );
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Unable to complete authentication.");
+      setApiError(
+        error instanceof Error
+          ? `${error.message}. Make sure the backend is running and your phone is on the same Wi-Fi.`
+          : "Unable to complete authentication. Make sure the backend is running and your phone is on the same Wi-Fi.",
+      );
     } finally {
       setIsBusy(false);
     }
@@ -598,8 +646,12 @@ export default function App() {
         throw new Error(uploadResult.body || `Upload failed with status ${uploadResult.status}`);
       }
 
-      await refreshScores();
-      setSuccessMessage("Score uploaded successfully. It is now stored in your library.");
+      const refreshed = await refreshScores();
+      if (refreshed) {
+        setSuccessMessage("Score uploaded successfully. It is now stored in your library.");
+      } else {
+        setApiError("Score uploaded, but the library could not refresh yet. Pull to refresh or reopen the tab.");
+      }
     } catch (error) {
       setApiError(
         error instanceof Error
@@ -1255,7 +1307,7 @@ export default function App() {
           keyboardDismissMode="on-drag"
         >
           <View style={styles.heroCard}>
-            <MusicHeroArt />
+            <BrandHeroArt />
             <Text style={styles.eyebrow}>Singer Access</Text>
             <Text style={styles.heroTitle}>Welcome to Singmobi.</Text>
             <Text style={styles.heroText}>
@@ -1340,7 +1392,7 @@ export default function App() {
         <View style={styles.heroCard}>
           <View style={styles.heroOverlayOne} />
           <View style={styles.heroOverlayTwo} />
-          <MusicHeroArt />
+          <BrandHeroArt />
           <Text style={styles.eyebrowDark}>Singmobi</Text>
           <Text style={styles.heroTitleDark}>Practice your choir part with a music-first mobile studio.</Text>
           <Text style={styles.heroTextDark}>
@@ -2387,6 +2439,20 @@ function MusicHeroArt() {
   );
 }
 
+function BrandHeroArt() {
+  return (
+    <View style={styles.heroArtWrap}>
+      <View style={styles.heroLogoCard}>
+        <Image
+          source={require("./assets/icon.png")}
+          style={styles.heroLogoImage}
+          resizeMode="contain"
+        />
+      </View>
+    </View>
+  );
+}
+
 function formatFileSize(bytes: number) {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -2524,6 +2590,23 @@ const styles = StyleSheet.create({
   heroArtWrap: {
     alignItems: "flex-end",
     marginBottom: 8,
+  },
+  heroLogoCard: {
+    width: 188,
+    height: 188,
+    borderRadius: 28,
+    backgroundColor: "rgba(9, 20, 36, 0.92)",
+    padding: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+    transform: [{ rotate: "-3deg" }],
+  },
+  heroLogoImage: {
+    width: "100%",
+    height: "100%",
+    borderRadius: 22,
   },
   heroScoreCard: {
     width: 168,

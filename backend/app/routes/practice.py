@@ -122,7 +122,9 @@ async def upload_practice_recording(
         reference_duration_ms=reference_duration_ms,
         recorded_at=datetime.now(UTC),
     )
-    await get_practice_collection().insert_one(record.model_dump(mode="json"))
+    record_document = record.model_dump(mode="json")
+    record_document["owner_id"] = current_user.id
+    await get_practice_collection().insert_one(record_document)
     return record
 
 

@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: singmobi-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: APP_NAME
+        value: SATB Choir API
+      - key: ENVIRONMENT
+        value: production
+      - key: API_PREFIX
+        value: /api
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: satb_choir_app
+      - key: ALLOWED_ORIGINS
+        value: '["*"]'
+      - key: AUDIVERIS_COMMAND
+        value: ""
+      - key: SATB_MODEL_PATH
+        value: artifacts/satb_random_forest.joblib
+      - key: USE_ML_CLASSIFIER
+        value: "true"

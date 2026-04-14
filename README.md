@@ -48,6 +48,54 @@ Backend interface:
 
 Copy `backend/.env.example` to `backend/.env`, then replace the MongoDB placeholder values with your Atlas connection string and database name.
 
+## Deploy Backend On Render
+
+The easiest free deployment path for Singmobi is:
+
+- `Render` for the FastAPI backend
+- `MongoDB Atlas` for the database
+
+This repo now includes [render.yaml](d:\FINAL YEAR PROJECT\satb-choir-app\render.yaml) so Render can create the backend service from source.
+
+### Before you deploy
+
+1. Create a free `MongoDB Atlas` cluster
+2. Get the Atlas connection string
+3. Push your latest code to GitHub
+
+### Render setup
+
+1. Go to `https://render.com`
+2. Create a new Blueprint or Web Service from your GitHub repo
+3. If you use the included `render.yaml`, Render will detect:
+   - `rootDir`: `backend`
+   - `buildCommand`: `pip install -r requirements.txt`
+   - `startCommand`: `python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+4. In Render environment variables, set:
+   - `MONGODB_URI` = your real MongoDB Atlas URI
+
+### After deploy
+
+Your backend URL will look something like:
+
+```text
+https://singmobi-backend.onrender.com
+```
+
+Test it in a browser:
+
+```text
+https://your-render-url.onrender.com/api/health
+```
+
+Then point the mobile app to that URL in `mobile/.env`:
+
+```env
+EXPO_PUBLIC_API_BASE_URL=https://your-render-url.onrender.com
+```
+
+Restart Expo or rebuild the APK after changing the mobile backend URL.
+
 ## Current status
 
 - Next.js scaffolded and ready

@@ -204,7 +204,9 @@ async def upload_score(
         owner_id=current_user.id,
         analysis=None,
     )
-    await get_scores_collection().insert_one(score.model_dump(mode="json"))
+    score_document = score.model_dump(mode="json")
+    score_document["owner_id"] = current_user.id
+    await get_scores_collection().insert_one(score_document)
     return score
 
 
