@@ -31,6 +31,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
 Required production environment variables:
 
+- `STORAGE_BACKEND` -> `file` for zero-cost demo deploys, or `mongodb` for Atlas-backed deploys
 - `MONGODB_URI` -> your MongoDB Atlas connection string
 - `MONGODB_DB_NAME` -> usually `satb_choir_app`
 - `API_PREFIX` -> `/api`

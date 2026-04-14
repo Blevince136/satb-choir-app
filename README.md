@@ -59,9 +59,10 @@ This repo now includes [render.yaml](d:\FINAL YEAR PROJECT\satb-choir-app\render
 
 ### Before you deploy
 
-1. Create a free `MongoDB Atlas` cluster
-2. Get the Atlas connection string
-3. Push your latest code to GitHub
+1. Push your latest code to GitHub
+2. Choose a storage mode:
+   - `file` for a zero-cost Render demo deployment
+   - `mongodb` for a fuller deployment backed by MongoDB Atlas
 
 ### Render setup
 
@@ -71,8 +72,35 @@ This repo now includes [render.yaml](d:\FINAL YEAR PROJECT\satb-choir-app\render
    - `rootDir`: `backend`
    - `buildCommand`: `pip install -r requirements.txt`
    - `startCommand`: `python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-4. In Render environment variables, set:
-   - `MONGODB_URI` = your real MongoDB Atlas URI
+4. The included [render.yaml](d:\FINAL YEAR PROJECT\satb-choir-app\render.yaml) currently uses:
+   - `STORAGE_BACKEND=file`
+
+This lets you deploy without paying for Atlas right now.
+
+### Zero-cost demo mode
+
+In file-storage mode:
+
+- user accounts
+- sessions
+- scores metadata
+- practice metadata
+
+are stored in backend JSON files on the Render instance.
+
+Important:
+- this is good for demos and testing
+- it is not durable like a cloud database
+- data may be lost when the service is rebuilt or the instance filesystem resets
+
+### Full production mode
+
+If you later want stronger persistence:
+
+1. create a MongoDB Atlas cluster
+2. set:
+   - `STORAGE_BACKEND=mongodb`
+   - `MONGODB_URI=your-atlas-uri`
 
 ### After deploy
 
