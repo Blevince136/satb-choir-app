@@ -126,7 +126,7 @@ const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_BASE_URL ||
   process.env.EXPO_API_BASE_URL ||
   process.env.NEXT_PUBLIC_API_BASE_URL ||
-  "http://10.0.2.2:8000";
+  "http://192.168.0.102:8000";
 
 const allowedMimeTypes = [
   "application/pdf",
@@ -202,6 +202,14 @@ async function readApiError(response: Response, fallback: string): Promise<strin
   } catch {
     return fallback;
   }
+}
+
+function formatRequestError(endpoint: string, error: unknown) {
+  const url = `${API_BASE_URL}${endpoint}`;
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message} | Request: ${url}`;
+  }
+  return `Request failed for ${url}`;
 }
 
 const tabs = ["Home", "Library", "Audio", "Practice", "Account"] as const;
@@ -341,12 +349,9 @@ export default function App() {
         }
       } catch (error) {
         await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY);
+        // If session restore fails, fall back to the sign-in screen without blocking startup.
         if (active) {
-          setApiError(
-            error instanceof Error
-              ? `${error.message}. Please sign in again if needed.`
-              : "Unable to restore session. Please sign in again if needed.",
-          );
+          setApiError("");
         }
       } finally {
         if (active) {
@@ -573,8 +578,8 @@ export default function App() {
           },
           body: JSON.stringify(payload),
         }),
-        12000,
-        "Authentication request timed out",
+        60000,
+        `Authentication request timed out: POST ${API_BASE_URL}${endpoint}`,
       );
 
       if (!response.ok) {
@@ -582,7 +587,16 @@ export default function App() {
           response,
           `Authentication failed (${response.status}).`,
         );
-        throw new Error(message);
+        if (response.status === 409 && authMode === "signUp") {
+          setApiError(
+            `${message} Please sign in with that email or use a different email address.`,
+          );
+        } else if (response.status === 401 && authMode === "signIn") {
+          setApiError(`${message} Please check your password and try again.`);
+        } else {
+          setApiError(`${message} (HTTP ${response.status})`);
+        }
+        return;
       }
 
       const session = (await response.json()) as AuthSessionResponse;
@@ -601,9 +615,7 @@ export default function App() {
       );
     } catch (error) {
       setApiError(
-        error instanceof Error
-          ? `${error.message}. Make sure the backend is running and your phone is on the same Wi-Fi.`
-          : "Unable to complete authentication. Make sure the backend is running and your phone is on the same Wi-Fi.",
+        `${formatRequestError(endpoint, error)}. Make sure the backend is running and your phone is on the same Wi-Fi.`,
       );
     } finally {
       setIsBusy(false);
@@ -1285,6 +1297,8 @@ export default function App() {
         <StatusBar style="light" />
         <View style={[styles.container, { justifyContent: "center", flex: 1 }]}>
           <View style={styles.formCard}>
+            <BrandHeroArt />
+            <Text style={styles.apiHintText}>API: {API_BASE_URL}</Text>
             <ActivityIndicator size="large" color="#F2B84B" />
             <Text style={styles.listCardText}>Restoring your Singmobi session...</Text>
           </View>
@@ -1389,15 +1403,16 @@ export default function App() {
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
       >
-        <View style={styles.heroCard}>
-          <View style={styles.heroOverlayOne} />
-          <View style={styles.heroOverlayTwo} />
-          <BrandHeroArt />
-          <Text style={styles.eyebrowDark}>Singmobi</Text>
-          <Text style={styles.heroTitleDark}>Practice your choir part with a music-first mobile studio.</Text>
-          <Text style={styles.heroTextDark}>
-            A singer-focused choir app with score parsing, stored tune playback, SATB exports, and a cleaner audio workflow.
-          </Text>
+          <View style={styles.heroCard}>
+            <View style={styles.heroOverlayOne} />
+            <View style={styles.heroOverlayTwo} />
+            <BrandHeroArt />
+            <Text style={styles.eyebrowDark}>Singmobi</Text>
+            <Text style={styles.apiHintTextDark}>API: {API_BASE_URL}</Text>
+            <Text style={styles.heroTitleDark}>Practice your choir part with a music-first mobile studio.</Text>
+            <Text style={styles.heroTextDark}>
+              A singer-focused choir app with score parsing, stored tune playback, SATB exports, and a cleaner audio workflow.
+            </Text>
           <View style={styles.heroStatsRow}>
             <View style={styles.heroStatCard}>
               <Text style={styles.heroStatLabel}>Practice</Text>
@@ -2921,6 +2936,22 @@ const styles = StyleSheet.create({
     color: "#9FB2CA",
     fontSize: 14,
     lineHeight: 22,
+  },
+  apiHintText: {
+    marginTop: 10,
+    marginBottom: 10,
+    color: "#9DB3D8",
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.2,
+  },
+  apiHintTextDark: {
+    marginTop: 8,
+    marginBottom: 8,
+    color: "#C8D4E7",
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.2,
   },
   scoreActions: {
     flexDirection: "row",

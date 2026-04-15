@@ -573,13 +573,18 @@ def _prepare_pdf_input(file_path: Path) -> tuple[Path | None, list[str], str]:
             "audiveris",
         )
 
-    exported_path = exported_files[0]
+    exported_path = _choose_best_musicxml_export(exported_files)
+    warnings = ["PDF converted to MusicXML before SATB analysis."]
+    if len(exported_files) > 1:
+        warnings.append(
+            "Audiveris produced multiple exports; the most complete-looking file was selected."
+        )
     persisted_output = file_path.with_suffix(exported_path.suffix)
     persisted_output.write_bytes(exported_path.read_bytes())
     shutil.rmtree(output_dir, ignore_errors=True)
     return (
         persisted_output,
-        ["PDF converted to MusicXML before SATB analysis."],
+        warnings,
         "audiveris+music21",
     )
 
@@ -590,3 +595,19 @@ def _find_existing_export(file_path: Path) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _choose_best_musicxml_export(exported_files: list[Path]) -> Path:
+    if not exported_files:
+        raise ValueError("No MusicXML exports were produced.")
+
+    preferred_name_tokens = ("score", "full", "complete", "merged", "musicxml")
+
+    def score_candidate(candidate: Path) -> tuple[int, int, int]:
+        lower_name = candidate.stem.lower()
+        name_score = sum(token in lower_name for token in preferred_name_tokens)
+        suffix_score = 1 if candidate.suffix.lower() in {".musicxml", ".mxl"} else 0
+        size_score = int(candidate.stat().st_size)
+        return name_score, suffix_score, size_score
+
+    return max(exported_files, key=score_candidate)

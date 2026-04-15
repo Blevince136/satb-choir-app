@@ -34,6 +34,7 @@ type VoiceCard = {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
+const DEMO_API_PREFIX = "/api/demo";
 
 const voiceCards: VoiceCard[] = [
   { part: "Soprano", range: "C4 - A5", color: "from-[#b64d57] to-[#7d2431]" },
@@ -80,8 +81,8 @@ export function Dashboard() {
     try {
       const [healthData, scoresData, logsData] = await Promise.all([
         readJson<HealthResponse>("/api/health"),
-        readJson<Score[]>("/api/scores"),
-        readJson<PracticeLog[]>("/api/scores/practice-logs"),
+        readJson<Score[]>(`${DEMO_API_PREFIX}/scores`),
+        readJson<PracticeLog[]>(`${DEMO_API_PREFIX}/practice-logs`),
       ]);
       setHealth(healthData);
       setScores(scoresData);
@@ -119,7 +120,7 @@ export function Dashboard() {
             format,
           });
 
-          await readJson<Score>(`/api/scores/mock-upload?${params.toString()}`, {
+          await readJson<Score>(`${DEMO_API_PREFIX}/mock-upload?${params.toString()}`, {
             method: "POST",
           });
 
@@ -149,7 +150,7 @@ export function Dashboard() {
     startTransition(() => {
       void (async () => {
         try {
-          await readJson<PracticeLog>("/api/scores/practice-logs", {
+          await readJson<PracticeLog>(`${DEMO_API_PREFIX}/practice-logs`, {
             method: "POST",
             body: JSON.stringify({
               singer_name: singer,
@@ -230,16 +231,16 @@ export function Dashboard() {
                 Active Endpoints
               </p>
               <p className="mt-2">GET /api/health</p>
-              <p>GET /api/scores</p>
-              <p>POST /api/scores/mock-upload</p>
-              <p>GET | POST /api/scores/practice-logs</p>
+              <p>GET /api/demo/scores</p>
+              <p>POST /api/demo/mock-upload</p>
+              <p>GET | POST /api/demo/practice-logs</p>
             </div>
           </div>
         </aside>
       </section>
 
       <section className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Scores" value={String(scores.length)} note="mock uploads saved in API memory" />
+        <StatCard label="Scores" value={String(scores.length)} note="demo uploads saved in API memory" />
         <StatCard label="SATB Accuracy" value={`${averageAccuracy}%`} note="average extraction benchmark" />
         <StatCard label="Practice Logs" value={String(logs.length)} note="trainer records currently stored" />
         <StatCard

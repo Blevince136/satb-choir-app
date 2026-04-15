@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import close_mongo_connection, connect_to_mongo
 from app.routes.auth import router as auth_router
+from app.routes.demo import router as demo_router
 from app.routes.health import router as health_router
 from app.routes.practice import router as practice_router
 from app.routes.scores import router as scores_router
@@ -34,5 +35,6 @@ app.add_middleware(
 
 app.include_router(health_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
+app.include_router(demo_router, prefix=settings.api_prefix)
 app.include_router(scores_router, prefix=settings.api_prefix)
 app.include_router(practice_router, prefix=settings.api_prefix)
